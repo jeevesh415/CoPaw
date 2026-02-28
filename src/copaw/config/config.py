@@ -58,6 +58,29 @@ class ConsoleConfig(BaseChannelConfig):
     enabled: bool = True
 
 
+class VoiceChannelConfig(BaseChannelConfig):
+    """Voice channel: Twilio ConversationRelay + Cloudflare Tunnel."""
+
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    phone_number: str = ""
+    phone_number_sid: str = ""
+    tts_provider: str = "google"
+    tts_voice: str = "en-US-Journey-D"
+    stt_provider: str = "deepgram"
+    language: str = "en-US"
+    welcome_greeting: str = "Hi! This is CoPaw. How can I help you?"
+    voice_system_prompt: str = (
+        "You are CoPaw, a helpful AI assistant on a phone call. "
+        "Keep responses concise and conversational. "
+        "No markdown, no lists. Natural speech only."
+    )
+    max_concurrent_calls: int = 1
+    max_call_duration_minutes: int = 30
+    log_transcripts: bool = True
+    local_port: int = 8088
+
+
 class ChannelConfig(BaseModel):
     """Built-in channel configs; extra keys allowed for plugin channels."""
 
@@ -69,6 +92,7 @@ class ChannelConfig(BaseModel):
     feishu: FeishuConfig = FeishuConfig()
     qq: QQConfig = QQConfig()
     console: ConsoleConfig = ConsoleConfig()
+    voice: VoiceChannelConfig = VoiceChannelConfig()
 
 
 class LastApiConfig(BaseModel):
@@ -195,4 +219,5 @@ ChannelConfigUnion = Union[
     FeishuConfig,
     QQConfig,
     ConsoleConfig,
+    VoiceChannelConfig,
 ]

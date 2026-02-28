@@ -126,6 +126,44 @@ export function ChannelDrawer({
             </Form.Item>
           </>
         );
+      case "voice":
+        return (
+          <>
+            <Form.Item name="twilio_account_sid" label={t("channels.twilioAccountSid")}>
+              <Input placeholder="ACxxxxxxxx" />
+            </Form.Item>
+            <Form.Item name="twilio_auth_token" label={t("channels.twilioAuthToken")}>
+              <Input.Password />
+            </Form.Item>
+            <Form.Item name="phone_number" label={t("channels.phoneNumber")}>
+              <Input placeholder="+15551234567" />
+            </Form.Item>
+            <Form.Item name="phone_number_sid" label={t("channels.phoneNumberSid")}>
+              <Input placeholder="PNxxxxxxxx" />
+            </Form.Item>
+            <Form.Item name="tts_provider" label={t("channels.ttsProvider")}>
+              <Input placeholder="google" />
+            </Form.Item>
+            <Form.Item name="tts_voice" label={t("channels.ttsVoice")}>
+              <Input placeholder="en-US-Journey-D" />
+            </Form.Item>
+            <Form.Item name="stt_provider" label={t("channels.sttProvider")}>
+              <Input placeholder="deepgram" />
+            </Form.Item>
+            <Form.Item name="language" label={t("channels.language")}>
+              <Input placeholder="en-US" />
+            </Form.Item>
+            <Form.Item name="welcome_greeting" label={t("channels.welcomeGreeting")}>
+              <Input.TextArea rows={2} />
+            </Form.Item>
+            <Form.Item name="max_concurrent_calls" label={t("channels.maxConcurrentCalls")}>
+              <InputNumber min={1} style={{ width: "100%" }} />
+            </Form.Item>
+            <Form.Item name="local_port" label={t("channels.localPort")}>
+              <InputNumber min={1024} max={65535} style={{ width: "100%" }} />
+            </Form.Item>
+          </>
+        );
       default:
         return null;
     }
@@ -170,9 +208,11 @@ export function ChannelDrawer({
             <Switch />
           </Form.Item>
 
-          <Form.Item name="bot_prefix" label="Bot Prefix">
-            <Input placeholder="@bot" />
-          </Form.Item>
+          {activeKey !== "voice" && (
+            <Form.Item name="bot_prefix" label="Bot Prefix">
+              <Input placeholder="@bot" />
+            </Form.Item>
+          )}
 
           {renderExtraFields(activeKey)}
 

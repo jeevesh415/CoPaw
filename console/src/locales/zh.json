@@ -162,7 +162,18 @@
     "httpProxyPlaceholder": "http://127.0.0.1:18118",
     "httpProxyAuthPlaceholder": "用户名:密码",
     "dbPathPlaceholder": "~/Library/Messages/chat.db",
-    "botPrefixPlaceholder": "@bot"
+    "botPrefixPlaceholder": "@bot",
+    "twilioAccountSid": "Twilio 账户 SID",
+    "twilioAuthToken": "Twilio 认证令牌",
+    "phoneNumber": "电话号码",
+    "phoneNumberSid": "电话号码 SID",
+    "ttsProvider": "TTS 提供商",
+    "ttsVoice": "TTS 语音",
+    "sttProvider": "STT 提供商",
+    "language": "语言",
+    "welcomeGreeting": "欢迎语",
+    "maxConcurrentCalls": "最大并发通话数",
+    "localPort": "本地端口"
   },
   "sessions": {
     "title": "会话",

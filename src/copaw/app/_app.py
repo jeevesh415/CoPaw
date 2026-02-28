@@ -28,6 +28,7 @@ from .crons.repo.json_repo import JsonJobRepository
 from .crons.manager import CronManager
 from .runner.manager import ChatManager
 from .routers import router as api_router
+from .routers.voice import voice_router
 from ..envs import load_envs_into_environ
 
 # Apply log level on load so reload child process gets same level as CLI.
@@ -203,6 +204,10 @@ app.include_router(
     prefix="/api/agent",
     tags=["agent"],
 )
+
+# Voice channel: Twilio-facing endpoints at root level (not under /api/).
+# POST /voice/incoming, WS /voice/ws, POST /voice/status-callback
+app.include_router(voice_router, tags=["voice"])
 
 # Mount console: root static files (logo.png etc.) then assets, then SPA
 # fallback.

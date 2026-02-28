@@ -35,6 +35,7 @@ BUILTIN_CHANNEL_TYPES = (
     "feishu",
     "qq",
     "console",
+    "voice",
 )
 
 # ChannelType is str to allow plugin channels; built-in set above.

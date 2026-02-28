@@ -9,4 +9,5 @@ export const CHANNEL_LABELS: Record<ChannelKey, string> = {
   feishu: "Feishu",
   qq: "QQ",
   console: "Console",
+  voice: "Twilio",
 };

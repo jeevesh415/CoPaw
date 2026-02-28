@@ -162,7 +162,18 @@
     "httpProxyPlaceholder": "http://127.0.0.1:18118",
     "httpProxyAuthPlaceholder": "user:password",
     "dbPathPlaceholder": "~/Library/Messages/chat.db",
-    "botPrefixPlaceholder": "@bot"
+    "botPrefixPlaceholder": "@bot",
+    "twilioAccountSid": "Twilio Account SID",
+    "twilioAuthToken": "Twilio Auth Token",
+    "phoneNumber": "Phone Number",
+    "phoneNumberSid": "Phone Number SID",
+    "ttsProvider": "TTS Provider",
+    "ttsVoice": "TTS Voice",
+    "sttProvider": "STT Provider",
+    "language": "Language",
+    "welcomeGreeting": "Welcome Greeting",
+    "maxConcurrentCalls": "Max Concurrent Calls",
+    "localPort": "Local Port"
   },
   "sessions": {
     "title": "Sessions",

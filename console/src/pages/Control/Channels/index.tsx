@@ -32,6 +32,7 @@ function ChannelsPage() {
       "imessage",
       "discord",
       "qq",
+      "voice",
     ];
 
     channelOrder.forEach((key) => {
