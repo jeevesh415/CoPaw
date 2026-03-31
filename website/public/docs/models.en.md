@@ -10,7 +10,7 @@ CoPaw supports various LLM providers:
 
 - **Local Providers** (llama.cpp / Ollama / LM Studio)
 - **Cloud Providers** (usually require an API Key)
-- **Custom Providers** (if the preset cloud and local providers do not meet your needs)
+- **Custom Providers** (if the preset local and cloud providers do not meet your needs)
 
 ### Local Provider Configuration
 
@@ -21,6 +21,8 @@ Currently supported local providers include:
 - [LM Studio](https://lmstudio.ai/)
 
 CoPaw Local (llama.cpp) is built into CoPaw and does not require additional software installation. Ollama and LM Studio require you to install the corresponding software in advance.
+
+CoPaw also provides the CoPaw-Flash series for local deployment. It includes 2B, 4B, and 9B variants, with original, 4-bit, and 8-bit versions for different VRAM and performance requirements. These models are open-sourced on [ModelScope](https://www.modelscope.cn/organization/AgentScope?tab=model) and [Hugging Face](https://huggingface.co/agentscope-ai/models). The following sections explain how to use CoPaw-Flash with each local provider.
 
 **CoPaw Local (llama.cpp) Configuration**
 
@@ -34,7 +36,7 @@ When configuring CoPaw Local for the first time, you need to download the llama.
 
 ![Download llama.cpp](https://gw.alicdn.com/imgextra/i3/O1CN01Nqs9Cg1Vp6uA2WdiM_!!6000000002701-2-tps-1270-874.png)
 
-CoPaw team has trained a series of small models (CoPaw-flash series) suitable for local deployment. Based on your current device (CPU / NVIDIA GPU / Apple M series chip), CoPaw will automatically recommend suitable model versions for you. You can select the models you need to download. If you want to use other models, you can add them by entering the _Model Repository ID_ and _Download Source_. The Model Repository ID refers to the identifier of the model in ModelScope / Hugging Face, such as `Qwen/Qwen3-0.6B-GGUF`. The Download Source refers to the source for downloading the model. Currently, ModelScope and Hugging Face are supported.
+CoPaw team has trained a series of small models (the CoPaw-Flash series) suitable for local deployment. Based on your current device (CPU / NVIDIA GPU / Apple M series chip), CoPaw will automatically recommend suitable model versions for you. If you want to use CoPaw-Flash, simply choose an appropriate version here, download it, and start it. If you want to use other models, you can add them by entering the _Model Repository ID_ and _Download Source_. The Model Repository ID refers to the identifier of the model in ModelScope / Hugging Face, such as `Qwen/Qwen3-0.6B-GGUF`. The Download Source refers to where the model is downloaded from. Currently, ModelScope and Hugging Face are supported.
 
 ![Download Model](https://gw.alicdn.com/imgextra/i2/O1CN01IF2OXz1c99w9W8XGU_!!6000000003557-2-tps-1226-1202.png)
 
@@ -58,7 +60,44 @@ To verify that Ollama is working properly, go to the **Settings** page of the Co
 
 > For users deploying CoPaw in a Docker container, if Ollama is installed on the host machine, ensure that the Docker network configuration allows the container to access the host's Ollama service (add `--add-host=host.docker.internal:host-gateway` to the `docker run` command), and set the API address to `http://host.docker.internal:11434`.
 
-After installing and configuring Ollama, go to the **Models** page of the CoPaw Ollama provider and click **Auto Fetch Models** to get the list of available Ollama models. After fetching, you can further click **Test Connection** to verify if the models are working properly.
+If you want to use CoPaw-Flash with Ollama, it is recommended to choose a `Q8_0` or `Q4_K_M` quantized variant and import it with the following steps:
+
+1. Download a suitable quantized CoPaw-Flash model from [ModelScope](https://www.modelscope.cn/organization/AgentScope?tab=model) or [Hugging Face](https://huggingface.co/agentscope-ai/models), for example `AgentScope/CoPaw-Flash-4B-Q4_K_M`.
+
+ModelScope CLI:
+
+```bash
+modelscope download --model AgentScope/CoPaw-Flash-4B-Q4_K_M --local_dir ./dir
+```
+
+Hugging Face CLI:
+
+```bash
+hf download agentscope-ai/CoPaw-Flash-4B-Q4_K_M --local_dir ./dir
+```
+
+2. Create a text file named `copaw-flash.txt` and replace `/path/to/your/copaw-xxx.gguf` with the absolute path of the downloaded `.gguf` file:
+
+```text
+FROM /path/to/your/copaw-xxx.gguf
+TEMPLATE {{ .Prompt }}
+RENDERER qwen3.5
+PARSER qwen3.5
+PARAMETER presence_penalty 1.5
+PARAMETER temperature 1
+PARAMETER top_k 20
+PARAMETER top_p 0.95
+```
+
+3. Run the following command in your terminal to import the model into Ollama:
+
+```bash
+ollama create copaw-flash -f copaw-flash.txt
+```
+
+4. Go back to the CoPaw Ollama provider page and click **Discover Models** to add the model to CoPaw.
+
+After installing and configuring Ollama, go to the **Models** page of the CoPaw Ollama provider and click **Discover Models** to get the list of available Ollama models. After fetching, you can further click **Test Connection** to verify if the models are working properly.
 
 ![Ollama Model List](https://gw.alicdn.com/imgextra/i3/O1CN01esQyTg1eSyIlpRK69_!!6000000003871-2-tps-1208-1322.png)
 
@@ -78,7 +117,31 @@ To ensure a good experience in CoPaw, set the **Default Context Length** to at l
 
 After completing the above LM Studio configuration, go to the **Settings** page of the CoPaw LM Studio provider and enter the LM Studio API address, which can be found on the **Developer -> Local Server** page. Be sure to add the `/v1` suffix, e.g., `http://localhost:1234/v1`.
 
-The subsequent process is the same as for Ollama: click **Test Connection** to verify the connection, then go to the LM Studio model management page and click **Auto Fetch Models** to get the list of available models. After fetching, you can further click **Test Connection** to verify if the models are working properly.
+If you want to use CoPaw-Flash with LM Studio, it is also recommended to choose a `Q8_0` or `Q4_K_M` quantized variant and import it with the following steps:
+
+1. Download a suitable quantized CoPaw-Flash model from [ModelScope](https://www.modelscope.cn/organization/AgentScope?tab=model) or [Hugging Face](https://huggingface.co/agentscope-ai/models), for example `AgentScope/CoPaw-Flash-4B-Q4_K_M`.
+
+ModelScope CLI:
+
+```bash
+modelscope download --model AgentScope/CoPaw-Flash-4B-Q4_K_M --local_dir ./dir
+```
+
+Hugging Face CLI:
+
+```bash
+hf download agentscope-ai/CoPaw-Flash-4B-Q4_K_M --local_dir ./dir
+```
+
+2. Run the following command to import the downloaded `.gguf` file into LM Studio:
+
+```bash
+lms import /path/to/your/copaw-xxx.gguf -c -y --user-repo AgentScope/CoPaw-Flash
+```
+
+3. Go back to the CoPaw LM Studio provider page and click **Discover Models** to add the model to CoPaw.
+
+The subsequent process is the same as for Ollama: click **Test Connection** to verify the connection, then go to the LM Studio model management page and click **Discover Models** to get the list of available models. After fetching, you can further click **Test Connection** to verify if the models are working properly.
 
 > For users deploying CoPaw in a Docker container, if LM Studio is installed on the host machine, ensure that the Docker network configuration allows the container to access the host's LM Studio service (add `--add-host=host.docker.internal:host-gateway` to the `docker run` command), and set the API address to `http://host.docker.internal:1234/v1`.
 
