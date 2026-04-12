@@ -6,44 +6,17 @@ import {
   Switch,
   Button,
   Select,
-  message,
 } from "@agentscope-ai/design";
-import { Alert, ConfigProvider } from "antd";
+import { useAppMessage } from "../../../../hooks/useAppMessage";
+import { Alert, ConfigProvider, Spin } from "antd";
 import { LinkOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import type { FormInstance } from "antd";
-import { useCallback, useRef } from "react";
+import { useCallback } from "react";
 import { getChannelLabel, type ChannelKey } from "./constants";
+import { useChannelQrcode } from "./useChannelQrcode";
 import styles from "../index.module.less";
 import { useTheme } from "../../../../contexts/ThemeContext";
-
-const WECOM_SDK_URL =
-  "https://wwcdn.weixin.qq.com/node/wework/js/wecom-aibot-sdk@0.1.0.min.js";
-
-const WECOM_SOURCE = "copaw";
-
-interface WecomBotInfo {
-  botid: string;
-  secret: string;
-}
-
-interface WecomAuthError {
-  code: string;
-  message: string;
-  details?: unknown;
-}
-
-declare global {
-  interface Window {
-    WecomAIBotSDK?: {
-      openBotInfoAuthWindow: (options: {
-        source: string;
-        onCreated?: (bot: WecomBotInfo) => void;
-        onError?: (error: WecomAuthError) => void;
-      }) => Promise<WecomBotInfo> | void;
-    };
-  }
-}
 
 const CHANNELS_WITH_ACCESS_CONTROL: ChannelKey[] = [
   "telegram",
@@ -53,42 +26,52 @@ const CHANNELS_WITH_ACCESS_CONTROL: ChannelKey[] = [
   "wecom",
   "mattermost",
   "matrix",
-  "xiaoyi",
+  "weixin",
+  "imessage",
+  "onebot",
 ];
 
-// Doc EN URLs per channel (anchors on https://copaw.agentscope.io/docs/channels)
+// Doc EN URLs per channel (anchors on https://qwenpaw.agentscope.io/docs/channels)
 const CHANNEL_DOC_EN_URLS: Partial<Record<ChannelKey, string>> = {
   dingtalk:
-    "https://copaw.agentscope.io/docs/channels/?lang=en#DingTalk-recommended",
-  feishu: "https://copaw.agentscope.io/docs/channels/?lang=en#Feishu-Lark",
+    "https://qwenpaw.agentscope.io/docs/channels/?lang=en#DingTalk-recommended",
+  feishu: "https://qwenpaw.agentscope.io/docs/channels/?lang=en#Feishu-Lark",
   imessage:
-    "https://copaw.agentscope.io/docs/channels/?lang=en#iMessage-macOS-only",
-  discord: "https://copaw.agentscope.io/docs/channels/?lang=en#Discord",
-  qq: "https://copaw.agentscope.io/docs/channels/?lang=en#QQ",
-  telegram: "https://copaw.agentscope.io/docs/channels/?lang=en#Telegram",
-  mqtt: "https://copaw.agentscope.io/docs/channels/?lang=en#MQTT",
-  mattermost: "https://copaw.agentscope.io/docs/channels/?lang=en#Mattermost",
-  matrix: "https://copaw.agentscope.io/docs/channels/?lang=en#Matrix",
-  wecom: "https://copaw.agentscope.io/docs/channels/?lang=en#WeCom-WeChat-Work",
+    "https://qwenpaw.agentscope.io/docs/channels/?lang=en#iMessage-macOS-only",
+  discord: "https://qwenpaw.agentscope.io/docs/channels/?lang=en#Discord",
+  qq: "https://qwenpaw.agentscope.io/docs/channels/?lang=en#QQ",
+  telegram: "https://qwenpaw.agentscope.io/docs/channels/?lang=en#Telegram",
+  mqtt: "https://qwenpaw.agentscope.io/docs/channels/?lang=en#MQTT",
+  mattermost: "https://qwenpaw.agentscope.io/docs/channels/?lang=en#Mattermost",
+  matrix: "https://qwenpaw.agentscope.io/docs/channels/?lang=en#Matrix",
+  wecom:
+    "https://qwenpaw.agentscope.io/docs/channels/?lang=en#WeCom-WeChat-Work",
+  weixin:
+    "https://qwenpaw.agentscope.io/docs/channels/?lang=en#WeChat-Personal-iLink",
   xiaoyi:
     "https://developer.huawei.com/consumer/cn/doc/service/openclaw-0000002518410344",
+  onebot:
+    "https://qwenpaw.agentscope.io/docs/channels/?lang=en#OneBot-v11-NapCat--QQ-full-protocol",
 };
 
-// Doc ZH URLs per channel (anchors on https://copaw.agentscope.io/docs/channels)
+// Doc ZH URLs per channel (anchors on https://qwenpaw.agentscope.io/docs/channels)
 const CHANNEL_DOC_ZH_URLS: Partial<Record<ChannelKey, string>> = {
-  dingtalk: "https://copaw.agentscope.io/docs/channels/?lang=zh#钉钉推荐",
-  feishu: "https://copaw.agentscope.io/docs/channels/?lang=zh#飞书",
+  dingtalk: "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#钉钉推荐",
+  feishu: "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#飞书",
   imessage:
-    "https://copaw.agentscope.io/docs/channels/?lang=zh#iMessage仅-macOS",
-  discord: "https://copaw.agentscope.io/docs/channels/?lang=zh#Discord",
-  qq: "https://copaw.agentscope.io/docs/channels/?lang=zh#QQ",
-  telegram: "https://copaw.agentscope.io/docs/channels/?lang=zh#Telegram",
-  mqtt: "https://copaw.agentscope.io/docs/channels/?lang=zh#MQTT",
-  mattermost: "https://copaw.agentscope.io/docs/channels/?lang=zh#Mattermost",
-  matrix: "https://copaw.agentscope.io/docs/channels/?lang=zh#Matrix",
-  wecom: "https://copaw.agentscope.io/docs/channels/?lang=zh#企业微信",
+    "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#iMessage仅-macOS",
+  discord: "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#Discord",
+  qq: "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#QQ",
+  telegram: "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#Telegram",
+  mqtt: "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#MQTT",
+  mattermost: "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#Mattermost",
+  matrix: "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#Matrix",
+  wecom: "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#企业微信",
+  weixin: "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#微信个人iLink",
   xiaoyi:
     "https://developer.huawei.com/consumer/cn/doc/service/openclaw-0000002518410344",
+  onebot:
+    "https://qwenpaw.agentscope.io/docs/channels/?lang=zh#OneBot-v11NapCat--QQ-完整协议",
 };
 
 const TWILIO_CONSOLE_URL = "https://console.twilio.com";
@@ -127,67 +110,57 @@ export function ChannelDrawer({
   const { t, i18n } = useTranslation();
   const { isDark } = useTheme();
   const currentLang = i18n.language?.startsWith("zh") ? "zh" : "en";
-  const label = activeKey ? getChannelLabel(activeKey) : activeLabel;
-  const sdkLoadedRef = useRef(false);
+  const label = activeKey ? getChannelLabel(activeKey, t) : activeLabel;
+  const { message } = useAppMessage();
 
-  // Dynamically load the WeCom SDK script
-  const loadWecomSDK = useCallback((): Promise<void> => {
-    return new Promise((resolve, reject) => {
-      if (window.WecomAIBotSDK || sdkLoadedRef.current) {
-        resolve();
-        return;
-      }
-      const script = document.createElement("script");
-      script.src = WECOM_SDK_URL;
-      script.async = true;
-      script.onload = () => {
-        sdkLoadedRef.current = true;
-        resolve();
-      };
-      script.onerror = () => reject(new Error("Failed to load WeCom SDK"));
-      document.body.appendChild(script);
-    });
-  }, []);
+  // WeChat QR code hook
+  const weixinQrcode = useChannelQrcode({
+    channel: "weixin",
+    successStatus: "confirmed",
+    successCredentialKey: "bot_token",
+    pollInterval: 2000,
+    onSuccess: useCallback(
+      (credentials: Record<string, string>) => {
+        form.setFieldsValue({ bot_token: credentials.bot_token });
+        message.success(t("channels.weixinLoginSuccess"));
+      },
+      [form, message, t],
+    ),
+    onError: useCallback(
+      (type: "fetch" | "expired") => {
+        if (type === "expired") {
+          message.warning(t("channels.weixinQrcodeExpired"));
+        } else {
+          message.error(t("channels.weixinQrcodeFailed"));
+        }
+      },
+      [message, t],
+    ),
+  });
 
-  // Handle WeCom scan-to-authorize button click; source is fixed to WECOM_SOURCE
-  const handleWecomAuth = useCallback(async () => {
-    try {
-      await loadWecomSDK();
-    } catch {
-      message.error(t("channels.wecomSdkLoadFailed"));
-      return;
-    }
-    if (!window.WecomAIBotSDK) {
-      message.error(t("channels.wecomSdkLoadFailed"));
-      return;
-    }
-    const result = window.WecomAIBotSDK.openBotInfoAuthWindow({
-      source: WECOM_SOURCE,
-    });
-    if (result && typeof result.then === "function") {
-      result.then(
-        (bot) => {
-          if (bot?.botid) {
-            form.setFieldsValue({ bot_id: bot.botid, secret: bot.secret });
-            message.success(t("channels.wecomAuthSuccess"));
-          }
-        },
-        (error: WecomAuthError) => {
-          if (error?.code === "WINDOW_BLOCKED") {
-            message.error(t("channels.wecomWindowBlocked"));
-          } else if (error?.code === "CANCELLED") {
-            message.info(t("channels.wecomCancelled"));
-          } else {
-            message.error(
-              t("channels.wecomAuthFailed", {
-                msg: error?.message || error?.code || "Unknown error",
-              }),
-            );
-          }
-        },
-      );
-    }
-  }, [loadWecomSDK, form, t]);
+  // WeCom QR code hook
+  const wecomQrcode = useChannelQrcode({
+    channel: "wecom",
+    successStatus: "success",
+    successCredentialKey: "bot_id",
+    pollInterval: 3000,
+    onSuccess: useCallback(
+      (credentials: Record<string, string>) => {
+        form.setFieldsValue({
+          bot_id: credentials.bot_id,
+          secret: credentials.secret,
+        });
+        message.success(t("channels.wecomAuthSuccess"));
+      },
+      [form, message, t],
+    ),
+    onError: useCallback(
+      (_type: "fetch" | "expired") => {
+        message.error(t("channels.wecomQrcodeFailed"));
+      },
+      [message, t],
+    ),
+  });
 
   // ── Access control fields (shared across multiple channels) ──────────────
 
@@ -311,6 +284,14 @@ export function ChannelDrawer({
             <Form.Item name="http_proxy_auth" label="HTTP Proxy Auth">
               <Input placeholder="user:password" />
             </Form.Item>
+            <Form.Item
+              name="accept_bot_messages"
+              label={t("channels.acceptBotMessages")}
+              valuePropName="checked"
+              tooltip={t("channels.acceptBotMessagesTooltip")}
+            >
+              <Switch />
+            </Form.Item>
           </>
         );
 
@@ -391,6 +372,21 @@ export function ChannelDrawer({
         return (
           <>
             <Form.Item
+              name="domain"
+              label={t("channels.feishuRegion")}
+              initialValue="feishu"
+              tooltip={t("channels.feishuRegionTooltip")}
+            >
+              <Select>
+                <Select.Option value="feishu">
+                  {t("channels.feishuChina")}
+                </Select.Option>
+                <Select.Option value="lark">
+                  {t("channels.feishuInternational")}
+                </Select.Option>
+              </Select>
+            </Form.Item>
+            <Form.Item
               name="app_id"
               label="App ID"
               rules={[{ required: true }]}
@@ -410,8 +406,8 @@ export function ChannelDrawer({
             <Form.Item name="verification_token" label="Verification Token">
               <Input placeholder="Optional" />
             </Form.Item>
-            <Form.Item name="media_dir" label="Media Dir">
-              <Input placeholder="~/.copaw/media" />
+            <Form.Item name="media_dir" label={t("channels.weixinMediaDir")}>
+              <Input placeholder="~/.qwenpaw/media" />
             </Form.Item>
           </>
         );
@@ -580,8 +576,8 @@ export function ChannelDrawer({
             >
               <Input.Password placeholder="Mattermost bot token" />
             </Form.Item>
-            <Form.Item name="media_dir" label="Media Dir">
-              <Input placeholder="~/.copaw/media/mattermost" />
+            <Form.Item name="media_dir" label={t("channels.weixinMediaDir")}>
+              <Input placeholder="~/.qwenpaw/media/mattermost" />
             </Form.Item>
             <Form.Item
               name="show_typing"
@@ -659,20 +655,48 @@ export function ChannelDrawer({
       case "wecom":
         return (
           <>
-            <Form.Item label=" " colon={false}>
-              <span
-                style={{
-                  display: "block",
-                  marginBottom: 8,
-                  fontSize: 13,
-                  color: isDark ? "rgba(255,255,255,0.65)" : "rgba(0,0,0,0.45)",
-                }}
+            <ConfigProvider prefixCls="ant">
+              <Alert
+                type="warning"
+                showIcon
+                message={t("channels.wecomSetupGuide")}
+                style={{ marginBottom: 16 }}
+              />
+            </ConfigProvider>
+            <Form.Item label={t("channels.wecomScanAuth")}>
+              <Button
+                type="primary"
+                block
+                loading={wecomQrcode.loading}
+                onClick={wecomQrcode.fetchQrcode}
               >
-                {t("channels.wecomAuthHint")}
-              </span>
-              <Button type="primary" block onClick={handleWecomAuth}>
                 {t("channels.loginWeCom")}
               </Button>
+              {wecomQrcode.loading && (
+                <div style={{ textAlign: "center", marginTop: 12 }}>
+                  <Spin />
+                </div>
+              )}
+              {wecomQrcode.qrcodeImg && !wecomQrcode.loading && (
+                <div style={{ textAlign: "center", marginTop: 12 }}>
+                  <img
+                    src={`data:image/png;base64,${wecomQrcode.qrcodeImg}`}
+                    alt="WeCom QR Code"
+                    style={{ width: 200, height: 200 }}
+                  />
+                  <div
+                    style={{
+                      marginTop: 8,
+                      fontSize: 12,
+                      color: isDark
+                        ? "rgba(255,255,255,0.45)"
+                        : "rgba(0,0,0,0.45)",
+                    }}
+                  >
+                    {t("channels.wecomAuthHint")}
+                  </div>
+                </div>
+              )}
             </Form.Item>
             <Form.Item
               name="bot_id"
@@ -688,8 +712,8 @@ export function ChannelDrawer({
             >
               <Input.Password placeholder="Secret from WeCom backend" />
             </Form.Item>
-            <Form.Item name="media_dir" label="Media Dir">
-              <Input placeholder="~/.copaw/media" />
+            <Form.Item name="media_dir" label={t("channels.weixinMediaDir")}>
+              <Input placeholder="~/.qwenpaw/media" />
             </Form.Item>
             <Form.Item
               name="welcome_text"
@@ -735,6 +759,118 @@ export function ChannelDrawer({
             </Form.Item>
             <Form.Item name="ws_url" label="WebSocket URL">
               <Input placeholder="wss://hag.cloud.huawei.com/openclaw/v1/ws/link" />
+            </Form.Item>
+          </>
+        );
+
+      case "weixin":
+        return (
+          <>
+            <ConfigProvider prefixCls="ant">
+              <Alert
+                type="info"
+                showIcon
+                message={t("channels.weixinSetupGuide")}
+                style={{ marginBottom: 16 }}
+              />
+            </ConfigProvider>
+            <Form.Item label={t("channels.weixinScanLogin")}>
+              <Button
+                type="primary"
+                block
+                loading={weixinQrcode.loading}
+                onClick={weixinQrcode.fetchQrcode}
+              >
+                {t("channels.weixinGetQrcode")}
+              </Button>
+              {weixinQrcode.loading && (
+                <div style={{ textAlign: "center", marginTop: 12 }}>
+                  <Spin />
+                </div>
+              )}
+              {weixinQrcode.qrcodeImg && !weixinQrcode.loading && (
+                <div style={{ textAlign: "center", marginTop: 12 }}>
+                  <img
+                    src={`data:image/png;base64,${weixinQrcode.qrcodeImg}`}
+                    alt="WeChat QR Code"
+                    style={{ width: 200, height: 200 }}
+                  />
+                  <div
+                    style={{
+                      marginTop: 8,
+                      fontSize: 12,
+                      color: isDark
+                        ? "rgba(255,255,255,0.45)"
+                        : "rgba(0,0,0,0.45)",
+                    }}
+                  >
+                    {t("channels.weixinScanHint")}
+                  </div>
+                </div>
+              )}
+            </Form.Item>
+            <Form.Item
+              name="bot_token"
+              label={t("channels.weixinBotToken")}
+              tooltip={t("channels.weixinBotTokenTooltip")}
+            >
+              <Input.Password
+                placeholder={t("channels.weixinBotTokenPlaceholder")}
+              />
+            </Form.Item>
+            <Form.Item
+              name="bot_token_file"
+              label={t("channels.weixinBotTokenFile")}
+              tooltip={t("channels.weixinBotTokenFileTooltip")}
+            >
+              <Input placeholder="~/.qwenpaw/weixin_bot_token" />
+            </Form.Item>
+            <Form.Item name="media_dir" label={t("channels.weixinMediaDir")}>
+              <Input placeholder="~/.qwenpaw/media" />
+            </Form.Item>
+          </>
+        );
+
+      case "onebot":
+        return (
+          <>
+            <Form.Item
+              name="ws_host"
+              label="WebSocket Host"
+              rules={[{ required: true }]}
+            >
+              <Input placeholder="0.0.0.0" />
+            </Form.Item>
+            <Form.Item
+              name="ws_port"
+              label="WebSocket Port"
+              rules={[
+                { required: true },
+                {
+                  type: "number",
+                  min: 1,
+                  max: 65535,
+                  message: "Port must be between 1 and 65535",
+                },
+              ]}
+            >
+              <InputNumber
+                min={1}
+                max={65535}
+                style={{ width: "100%" }}
+                placeholder="6199"
+              />
+            </Form.Item>
+            <Form.Item name="access_token" label="Access Token">
+              <Input.Password placeholder="Access token for authentication" />
+            </Form.Item>
+            <Form.Item
+              name="share_session_in_group"
+              label={t("channels.onebotShareSessionInGroup")}
+              valuePropName="checked"
+              tooltip={t("channels.onebotShareSessionInGroupTooltip")}
+            >
+              <Switch />
             </Form.Item>
           </>
         );
@@ -796,16 +932,17 @@ export function ChannelDrawer({
               const url =
                 CHANNEL_DOC_EN_URLS[activeKey]! ||
                 CHANNEL_DOC_ZH_URLS[activeKey]!;
-              const isCopawDoc = url.includes(
-                "copaw.agentscope.io/docs/channels/",
+              const isQwenPawDoc = url.includes(
+                "qwenpaw.agentscope.io/docs/channels/",
               );
               const finalUrl =
-                isCopawDoc && currentLang === "zh"
+                isQwenPawDoc && currentLang === "zh"
                   ? CHANNEL_DOC_ZH_URLS[activeKey]!
                   : CHANNEL_DOC_EN_URLS[activeKey]!;
               window.open(finalUrl, "_blank");
             }}
             className={styles.dingtalkDocBtn}
+            style={{ color: "#FF7F16" }}
           >
             {label} Doc
           </Button>
@@ -819,6 +956,7 @@ export function ChannelDrawer({
             window.open(TWILIO_CONSOLE_URL, "_blank", "noopener,noreferrer")
           }
           className={styles.dingtalkDocBtn}
+          style={{ color: "#FF7F16" }}
         >
           {t("channels.voiceSetupLink")}
         </Button>

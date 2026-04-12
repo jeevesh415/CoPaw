@@ -3,14 +3,36 @@ import type {
   ProviderInfo,
   ProviderConfigRequest,
   ActiveModelsInfo,
+  GetActiveModelsRequest,
   ModelSlotRequest,
   CreateCustomProviderRequest,
   AddModelRequest,
+  ModelConfigRequest,
+  LocalActionResponse,
+  LocalModelConfig,
+  LocalModelConfigRequest,
   TestConnectionResponse,
   TestProviderRequest,
   TestModelRequest,
   DiscoverModelsResponse,
+  ProbeMultimodalResponse,
 } from "../types";
+
+function buildActiveModelQuery(params?: GetActiveModelsRequest): string {
+  if (!params?.scope && !params?.agent_id) {
+    return "/models/active";
+  }
+
+  const searchParams = new URLSearchParams();
+  if (params.scope) {
+    searchParams.set("scope", params.scope);
+  }
+  if (params.agent_id) {
+    searchParams.set("agent_id", params.agent_id);
+  }
+
+  return `/models/active?${searchParams.toString()}`;
+}
 
 export const providerApi = {
   listProviders: () => request<ProviderInfo[]>("/models"),
@@ -21,7 +43,8 @@ export const providerApi = {
       body: JSON.stringify(body),
     }),
 
-  getActiveModels: () => request<ActiveModelsInfo>("/models/active"),
+  getActiveModels: (params?: GetActiveModelsRequest) =>
+    request<ActiveModelsInfo>(buildActiveModelQuery(params)),
 
   setActiveLlm: (body: ModelSlotRequest) =>
     request<ActiveModelsInfo>("/models/active", {
@@ -59,6 +82,29 @@ export const providerApi = {
       { method: "DELETE" },
     ),
 
+  configureModel: (
+    providerId: string,
+    modelId: string,
+    body: ModelConfigRequest,
+  ) =>
+    request<ProviderInfo>(
+      `/models/${encodeURIComponent(providerId)}/models/${encodeURIComponent(
+        modelId,
+      )}/config`,
+      {
+        method: "PUT",
+        body: JSON.stringify(body),
+      },
+    ),
+
+  configureLocalModelSettings: (body: LocalModelConfigRequest) =>
+    request<LocalActionResponse>(`/local-models/config`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  getLocalModelConfig: () => request<LocalModelConfig>("/local-models/config"),
+
   /* ---- Test Connection ---- */
 
   testProviderConnection: (providerId: string, body?: TestProviderRequest) =>
@@ -86,5 +132,13 @@ export const providerApi = {
         method: "POST",
         body: body ? JSON.stringify(body) : undefined,
       },
+    ),
+
+  probeMultimodal: (providerId: string, modelId: string) =>
+    request<ProbeMultimodalResponse>(
+      `/models/${encodeURIComponent(providerId)}/models/${encodeURIComponent(
+        modelId,
+      )}/probe-multimodal`,
+      { method: "POST" },
     ),
 };
