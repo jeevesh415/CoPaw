@@ -8,6 +8,10 @@ sessions_mount_dir/
 
 # testing
 /coverage
+.coverage
+coverage.xml
+htmlcov/
+htmlcov.zip
 
 # cookbook
 cookbook/_build
@@ -20,6 +24,9 @@ dist/
 console/.cursor/
 src/qwenpaw/console/dist/
 src/qwenpaw/console/
+
+# Docs bundled at build time (copied from website/public/docs/)
+src/qwenpaw/docs/
 
 # frontend (website)
 website/node_modules/

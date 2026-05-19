@@ -5,21 +5,91 @@ from datetime import datetime
 from pathlib import Path
 
 from ..utils.file_handling import read_text_file_with_encoding_fallback
+from ...config.config import load_agent_config
 
 
 class AgentMdManager:
     """Manager for reading and writing markdown files in working and memory
     directories."""
 
-    def __init__(self, working_dir: str | Path):
-        """Initialize directories for working and memory markdown files."""
+    def __init__(
+        self,
+        working_dir: str | Path,
+        agent_id: str | None = None,
+    ):
+        """Initialize directories for working and memory markdown files.
+
+        Args:
+            working_dir: Path to agent's working directory
+            agent_id: Optional agent ID for loading memory_dir from config.
+                      If None, uses default "memory" directory.
+        """
         self.working_dir: Path = Path(working_dir)
         self.working_dir.mkdir(parents=True, exist_ok=True)
-        self.memory_dir: Path = self.working_dir / "memory"
+
+        # Dynamically get memory_dir from config if agent_id provided
+        if agent_id:
+            agent_config = load_agent_config(agent_id)
+            memory_dir_name = agent_config.running.daily_memory_dir
+        else:
+            memory_dir_name = "memory"
+
+        self.memory_dir: Path = self.working_dir / memory_dir_name
         self.memory_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Path safety helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sanitize_md_name(md_name: str) -> str:
+        """Normalize *md_name* to a plain filename (no path components).
+
+        Rejects names that contain path separators or ``..`` traversal
+        sequences so that callers cannot escape the intended directory.
+
+        Raises:
+            ValueError: If the name contains illegal path components.
+        """
+        # Normalise Windows-style backslashes before any other check
+        normalized = md_name.replace("\\", "/")
+
+        # Reject any component that looks like directory traversal
+        parts = normalized.split("/")
+        for part in parts:
+            if part == "..":
+                raise ValueError(
+                    f"Invalid md_name '{md_name}':"
+                    " path traversal is not allowed",
+                )
+
+        # Keep only the final component so that any remaining "/" is stripped
+        filename = parts[-1]
+
+        if not filename:
+            raise ValueError(f"Invalid md_name '{md_name}': filename is empty")
+
+        return filename
+
+    @staticmethod
+    def _assert_within_dir(file_path: Path, base_dir: Path) -> None:
+        """Raise *ValueError* if *file_path* resolves outside *base_dir*.
+
+        Uses :meth:`Path.resolve` so that symlinks are followed before the
+        comparison, which closes any remaining bypass vectors.
+        """
+        try:
+            file_path.resolve().relative_to(base_dir.resolve())
+        except ValueError:
+            raise ValueError(
+                f"Resolved path '{file_path}' escapes"
+                f" the allowed directory '{base_dir}'",
+            ) from None
 
     def list_working_mds(self) -> list[dict]:
         """List all markdown files with metadata in the working dir.
+
+        Returns files sorted by modification time descending (newest first).
 
         Returns:
             list[dict]: A list of dictionaries, each containing:
@@ -29,6 +99,9 @@ class AgentMdManager:
                 - modified_time: file modification timestamp
         """
         md_files = list(self.working_dir.glob("*.md"))
+        # Sort by modification time descending (newest first)
+        md_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+
         result = []
         for f in md_files:
             if f.is_file():
@@ -54,10 +127,11 @@ class AgentMdManager:
         Returns:
             str: The file content as string
         """
-        # Auto-append .md extension if not present
+        md_name = self._sanitize_md_name(md_name)
         if not md_name.endswith(".md"):
             md_name += ".md"
         file_path = self.working_dir / md_name
+        self._assert_within_dir(file_path, self.working_dir)
         if not file_path.exists():
             raise FileNotFoundError(f"Working md file not found: {md_name}")
 
@@ -65,14 +139,17 @@ class AgentMdManager:
 
     def write_working_md(self, md_name: str, content: str):
         """Write markdown content to a file in the working directory."""
-        # Auto-append .md extension if not present
+        md_name = self._sanitize_md_name(md_name)
         if not md_name.endswith(".md"):
             md_name += ".md"
         file_path = self.working_dir / md_name
+        self._assert_within_dir(file_path, self.working_dir)
         file_path.write_text(content, encoding="utf-8")
 
     def list_memory_mds(self) -> list[dict]:
         """List all markdown files with metadata in the memory dir.
+
+        Returns files sorted by modification time descending (newest first).
 
         Returns:
             list[dict]: A list of dictionaries, each containing:
@@ -82,6 +159,9 @@ class AgentMdManager:
                 - modified_time: file modification timestamp
         """
         md_files = list(self.memory_dir.glob("*.md"))
+        # Sort by modification time descending (newest first)
+        md_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+
         result = []
         for f in md_files:
             if f.is_file():
@@ -107,10 +187,11 @@ class AgentMdManager:
         Returns:
             str: The file content as string
         """
-        # Auto-append .md extension if not present
+        md_name = self._sanitize_md_name(md_name)
         if not md_name.endswith(".md"):
             md_name += ".md"
         file_path = self.memory_dir / md_name
+        self._assert_within_dir(file_path, self.memory_dir)
         if not file_path.exists():
             raise FileNotFoundError(f"Memory md file not found: {md_name}")
 
@@ -118,8 +199,9 @@ class AgentMdManager:
 
     def write_memory_md(self, md_name: str, content: str):
         """Write markdown content to a file in the memory directory."""
-        # Auto-append .md extension if not present
+        md_name = self._sanitize_md_name(md_name)
         if not md_name.endswith(".md"):
             md_name += ".md"
         file_path = self.memory_dir / md_name
+        self._assert_within_dir(file_path, self.memory_dir)
         file_path.write_text(content, encoding="utf-8")

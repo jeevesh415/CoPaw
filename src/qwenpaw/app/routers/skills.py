@@ -16,43 +16,50 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Body, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from agentscope_runtime.engine.schemas.exception import (
     AppBaseException,
 )
 
-from ...agents.skills_hub import (
+from ...agents.skill_system.hub import (
     SkillImportCancelled,
     search_hub_skills,
     import_pool_skill_from_hub,
     install_skill_from_hub,
 )
-from ...agents.skills_manager import (
+from ...agents.skill_system import (
     SkillConflictError,
     SkillPoolService,
-    SkillInfo,
     SkillService,
-    _default_pool_manifest,
-    _default_workspace_manifest,
-    _get_skill_mtime,
-    _mutate_json,
-    _read_skill_from_dir,
+)
+from ...agents.skill_system.models import SkillInfo
+from ...agents.skill_system.registry import (
+    BUILTIN_SKILL_LANGUAGES,
     get_pool_builtin_sync_status,
-    get_pool_skill_manifest_path,
-    get_skill_pool_dir,
-    get_workspace_skill_manifest_path,
-    get_workspace_skills_dir,
+    get_pool_builtin_update_notice,
     import_builtin_skills,
     list_builtin_import_candidates,
     list_workspaces,
-    read_skill_pool_manifest,
-    read_skill_manifest,
     reconcile_pool_manifest,
     reconcile_workspace_manifest,
-    suggest_conflict_name,
     update_single_builtin,
+)
+from ...agents.skill_system.store import (
+    default_pool_manifest,
+    default_workspace_manifest,
+    get_pool_skill_manifest_path,
+    get_skill_mtime,
+    get_skill_pool_dir,
+    get_workspace_skill_manifest_path,
+    get_workspace_skills_dir,
+    mutate_json,
+    normalize_skill_manifest_entry,
+    read_skill_from_dir,
+    read_skill_manifest,
+    read_skill_pool_manifest,
+    suggest_conflict_name,
 )
 from ...security.skill_scanner import SkillScanError
 from ..utils import schedule_agent_reload
@@ -97,10 +104,10 @@ def _scan_error_payload(exc: SkillScanError) -> dict[str, Any]:
 
 
 def _scan_error_response(exc: SkillScanError) -> JSONResponse:
-    """Build the historical 422 response shape used by skill endpoints.
+    """Build a 422 JSON response for skill scan failures.
 
-    We intentionally return a real HTTP 422 response object here so callers
-    and tests observe the same behavior as before the skill-pool refactor.
+    Returns a JSONResponse so callers receive structured scan
+    details rather than a bare HTTP error.
     """
     return JSONResponse(
         status_code=422,
@@ -121,6 +128,8 @@ class PoolSkillSpec(SkillInfo):
     commit_text: str = ""
     sync_status: str = ""
     latest_version_text: str = ""
+    builtin_language: str = ""
+    available_builtin_languages: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     config: dict[str, Any] = Field(default_factory=dict)
     last_updated: str = ""
@@ -147,12 +156,45 @@ class BuiltinImportSpec(BaseModel):
     version_text: str = ""
     current_version_text: str = ""
     current_source: str = ""
+    current_language: str = ""
+    available_languages: list[str] = Field(default_factory=list)
+    languages: dict[str, dict[str, Any]] = Field(default_factory=dict)
     status: str = ""
 
 
+class BuiltinRemovedSpec(BaseModel):
+    name: str
+    description: str = ""
+    current_version_text: str = ""
+    current_source: str = ""
+
+
+class BuiltinUpdateNotice(BaseModel):
+    fingerprint: str = ""
+    has_updates: bool = False
+    total_changes: int = 0
+    actionable_skill_names: list[str] = Field(default_factory=list)
+    added: list[BuiltinImportSpec] = Field(default_factory=list)
+    missing: list[BuiltinImportSpec] = Field(default_factory=list)
+    updated: list[BuiltinImportSpec] = Field(default_factory=list)
+    removed: list[BuiltinRemovedSpec] = Field(default_factory=list)
+
+
+class BuiltinImportSelection(BaseModel):
+    skill_name: str
+    language: str = ""
+
+
 class ImportBuiltinRequest(BaseModel):
-    skill_names: list[str] = Field(default_factory=list)
+    skill_names: list[str] = Field(
+        default_factory=list,
+    )  # Deprecated: use imports
+    imports: list[BuiltinImportSelection] = Field(default_factory=list)
     overwrite_conflicts: bool = False
+
+
+class UpdateBuiltinRequest(BaseModel):
+    language: str = ""
 
 
 class CreateSkillRequest(BaseModel):
@@ -294,9 +336,9 @@ def _restore_workspace_skill(snapshot: dict[str, Any]) -> None:
             return
         payload["skills"][skill_name] = copy.deepcopy(entry)
 
-    _mutate_json(
+    mutate_json(
         get_workspace_skill_manifest_path(workspace_dir),
-        _default_workspace_manifest(),
+        default_workspace_manifest(),
         _restore,
     )
     reconcile_workspace_manifest(workspace_dir)
@@ -473,23 +515,36 @@ def _build_workspace_skill_specs(workspace_dir: Path) -> list[SkillSpec]:
     entries = manifest.get("skills", {})
     skill_root = get_workspace_skills_dir(workspace_dir)
     specs: list[SkillSpec] = []
-    for skill_name, entry in sorted(entries.items()):
-        source = entry.get("source", "customized")
-        skill_dir = skill_root / skill_name
-        skill = _read_skill_from_dir(skill_dir, source)
-        if skill is None:
-            continue
-        dump = skill.model_dump()
-        dump["tags"] = entry.get("tags") or []
-        specs.append(
-            SkillSpec(
-                **dump,
-                enabled=entry.get("enabled", False),
-                channels=entry.get("channels") or ["all"],
-                config=entry.get("config") or {},
-                last_updated=_get_skill_mtime(skill_dir),
-            ),
-        )
+    for skill_name, raw_entry in sorted(entries.items()):
+        entry = normalize_skill_manifest_entry(raw_entry)
+        if raw_entry not in (None, entry):
+            logger.warning(
+                "Skipping malformed workspace skill entry '%s' in manifest",
+                skill_name,
+            )
+        try:
+            source = entry.get("source", "customized")
+            skill_dir = skill_root / skill_name
+            skill = read_skill_from_dir(skill_dir, source)
+            if skill is None:
+                continue
+            dump = skill.model_dump()
+            dump["tags"] = entry.get("tags") or []
+            specs.append(
+                SkillSpec(
+                    **dump,
+                    enabled=entry.get("enabled", False),
+                    channels=entry.get("channels") or ["all"],
+                    config=entry.get("config") or {},
+                    last_updated=get_skill_mtime(skill_dir),
+                ),
+            )
+        except Exception:
+            logger.warning(
+                "Skipping workspace skill '%s': failed to build spec",
+                skill_name,
+                exc_info=True,
+            )
     return specs
 
 
@@ -497,31 +552,56 @@ def _build_pool_skill_specs() -> list[PoolSkillSpec]:
     manifest = read_skill_pool_manifest()
     entries = manifest.get("skills", {})
     pool_dir = get_skill_pool_dir()
-    sync_info = get_pool_builtin_sync_status()
+    sync_info = get_pool_builtin_sync_status(pool_skills=entries)
     specs: list[PoolSkillSpec] = []
-    for skill_name, entry in sorted(entries.items()):
-        source = entry.get("source", "customized")
-        skill_dir = pool_dir / skill_name
-        skill = _read_skill_from_dir(skill_dir, source)
-        if skill is None:
-            continue
-        info = sync_info.get(skill_name, {})
-        dump = skill.model_dump(exclude={"version_text"})
-        dump["tags"] = entry.get("tags") or []
-        specs.append(
-            PoolSkillSpec(
-                **dump,
-                protected=bool(entry.get("protected", False)),
-                version_text=str(entry.get("version_text", "") or ""),
-                commit_text=str(entry.get("commit_text", "") or ""),
-                sync_status=str(info.get("sync_status", "") or ""),
-                latest_version_text=str(
-                    info.get("latest_version_text", "") or "",
+    for skill_name, raw_entry in sorted(entries.items()):
+        entry = normalize_skill_manifest_entry(raw_entry)
+        if raw_entry not in (None, entry):
+            logger.warning(
+                "Skipping malformed pool skill entry '%s' in manifest",
+                skill_name,
+            )
+        try:
+            source = entry.get("source", "customized")
+            skill_dir = pool_dir / skill_name
+            skill = read_skill_from_dir(skill_dir, source)
+            if skill is None:
+                continue
+            info = sync_info.get(skill_name, {})
+            dump = skill.model_dump(exclude={"version_text"})
+            dump["tags"] = entry.get("tags") or []
+            specs.append(
+                PoolSkillSpec(
+                    **dump,
+                    protected=bool(entry.get("protected", False)),
+                    version_text=str(entry.get("version_text", "") or ""),
+                    commit_text=str(entry.get("commit_text", "") or ""),
+                    sync_status=str(info.get("sync_status", "") or ""),
+                    latest_version_text=str(
+                        info.get("latest_version_text", "") or "",
+                    ),
+                    builtin_language=str(
+                        entry.get("builtin_language", "") or "",
+                    ),
+                    available_builtin_languages=[
+                        str(language)
+                        for language in (
+                            info.get("available_languages")
+                            or entry.get("available_builtin_languages")
+                            or []
+                        )
+                        if str(language)
+                    ],
+                    config=entry.get("config") or {},
+                    last_updated=get_skill_mtime(skill_dir),
                 ),
-                config=entry.get("config") or {},
-                last_updated=_get_skill_mtime(skill_dir),
-            ),
-        )
+            )
+        except Exception:
+            logger.warning(
+                "Skipping pool skill '%s': failed to build spec",
+                skill_name,
+                exc_info=True,
+            )
     return specs
 
 
@@ -651,6 +731,31 @@ async def list_pool_builtin_sources() -> list[BuiltinImportSpec]:
     return [
         BuiltinImportSpec(**item) for item in list_builtin_import_candidates()
     ]
+
+
+@router.get("/pool/builtin-notice")
+async def get_pool_builtin_notice() -> BuiltinUpdateNotice:
+    notice = get_pool_builtin_update_notice()
+    return BuiltinUpdateNotice(
+        fingerprint=str(notice.get("fingerprint", "") or ""),
+        has_updates=bool(notice.get("has_updates", False)),
+        total_changes=int(notice.get("total_changes", 0) or 0),
+        actionable_skill_names=[
+            str(name)
+            for name in notice.get("actionable_skill_names", [])
+            if str(name)
+        ],
+        added=[BuiltinImportSpec(**item) for item in notice.get("added", [])],
+        missing=[
+            BuiltinImportSpec(**item) for item in notice.get("missing", [])
+        ],
+        updated=[
+            BuiltinImportSpec(**item) for item in notice.get("updated", [])
+        ],
+        removed=[
+            BuiltinRemovedSpec(**item) for item in notice.get("removed", [])
+        ],
+    )
 
 
 @router.post("")
@@ -1016,8 +1121,13 @@ async def download_pool_skill_to_workspaces(
 async def import_pool_builtins(
     body: ImportBuiltinRequest,
 ) -> dict[str, Any]:
+    imports: list[dict[str, Any]] = (
+        [item.model_dump() for item in body.imports]
+        if body.imports
+        else [{"skill_name": skill_name} for skill_name in body.skill_names]
+    )
     result = import_builtin_skills(
-        body.skill_names,
+        imports,
         overwrite_conflicts=body.overwrite_conflicts,
     )
     if result.get("conflicts") and not body.overwrite_conflicts:
@@ -1026,9 +1136,19 @@ async def import_pool_builtins(
 
 
 @router.post("/pool/{skill_name}/update-builtin")
-async def update_pool_builtin(skill_name: str) -> dict[str, Any]:
+async def update_pool_builtin(
+    skill_name: str,
+    body: UpdateBuiltinRequest | None = Body(default=None),
+) -> dict[str, Any]:
+    language = body.language if body is not None else ""
+    if language and language not in BUILTIN_SKILL_LANGUAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid language '{language}', "
+            f"must be one of {BUILTIN_SKILL_LANGUAGES}",
+        )
     try:
-        return update_single_builtin(skill_name)
+        return update_single_builtin(skill_name, language=language or None)
     except (ValueError, AppBaseException) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1067,7 +1187,7 @@ async def update_pool_skill_config(
         entry["config"] = dict(body.config)
         return True
 
-    updated = _mutate_json(manifest_path, _default_pool_manifest(), _update)
+    updated = mutate_json(manifest_path, default_pool_manifest(), _update)
     if not updated:
         raise HTTPException(status_code=404, detail="Pool skill not found")
     return {"updated": True}
@@ -1084,7 +1204,7 @@ async def delete_pool_skill_config(skill_name: str) -> dict[str, Any]:
         entry.pop("config", None)
         return True
 
-    updated = _mutate_json(manifest_path, _default_pool_manifest(), _update)
+    updated = mutate_json(manifest_path, default_pool_manifest(), _update)
     if not updated:
         raise HTTPException(status_code=404, detail="Pool skill not found")
     return {"cleared": True}
@@ -1171,9 +1291,14 @@ async def batch_disable_skills(
     request: Request,
     skills: list[str],
 ) -> dict[str, Any]:
-    workspace_dir = await _request_workspace_dir(request)
+    from ..agent_context import get_agent_for_request
+
+    workspace = await get_agent_for_request(request)
+    workspace_dir = Path(workspace.workspace_dir)
     service = SkillService(workspace_dir)
     results = {skill: service.disable_skill(skill) for skill in skills}
+    if any(result.get("success") for result in results.values()):
+        schedule_agent_reload(request, workspace.agent_id)
     return {"results": results}
 
 
@@ -1189,7 +1314,10 @@ async def batch_enable_skills(
         first item and ``reason="security_scan_failed"`` for the second,
         rather than aborting the entire batch.
     """
-    workspace_dir = await _request_workspace_dir(request)
+    from ..agent_context import get_agent_for_request
+
+    workspace = await get_agent_for_request(request)
+    workspace_dir = Path(workspace.workspace_dir)
     service = SkillService(workspace_dir)
     results: dict[str, Any] = {}
     for skill in skills:
@@ -1201,6 +1329,11 @@ async def batch_enable_skills(
                 "reason": "security_scan_failed",
                 "detail": _scan_error_payload(exc),
             }
+    if any(
+        isinstance(result, dict) and result.get("success")
+        for result in results.values()
+    ):
+        schedule_agent_reload(request, workspace.agent_id)
     return {"results": results}
 
 
@@ -1375,9 +1508,9 @@ async def update_skill_config_endpoint(
         entry["config"] = dict(body.config)
         return True
 
-    updated = _mutate_json(
+    updated = mutate_json(
         manifest_path,
-        _default_workspace_manifest(),
+        default_workspace_manifest(),
         _update,
     )
     if not updated:
@@ -1400,9 +1533,9 @@ async def delete_skill_config_endpoint(
         entry.pop("config", None)
         return True
 
-    updated = _mutate_json(
+    updated = mutate_json(
         manifest_path,
-        _default_workspace_manifest(),
+        default_workspace_manifest(),
         _update,
     )
     if not updated:

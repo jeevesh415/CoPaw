@@ -40,6 +40,8 @@ Your personal AI assistant — easy to install, deploy locally or in the cloud, 
 >
 > **Every channel** — DingTalk, Feishu, WeChat, Discord, Telegram, and more. One QwenPaw, connect as needed.
 >
+> **Memory-evolving & proactive** — Agent learns from interactions, reflects on experience, and proactively serves you. Gets smarter the more you use it.
+>
 > <details>
 > <summary><b>What you can do with QwenPaw</b></summary>
 >
@@ -58,14 +60,20 @@ Your personal AI assistant — easy to install, deploy locally or in the cloud, 
 
 ## News
 
-[2026-04-14] We've released v1.1.1! See the full [v1.1.1 Release Notes](https://qwenpaw.agentscope.io/release-notes).
+- [2026-05-19] We've released **v1.1.8**! See the full [v1.1.8 Release Notes](https://qwenpaw.agentscope.io/release-notes).
 
-- [v1.1.1] Added: OpenRouter and OpenCode model providers; model ID autocomplete when adding models, with model discovery enabled by default for all providers; built-in `list_agents` and `chat_with_agent` agent collaboration tools; Matrix channel rewrite with E2EE, mention handling, and message history; Feishu quoted message handling; DingTalk QR authentication; extended shell command guard rules; RESTful API tutorial documentation.
-- [v1.1.1] Changed: DingTalk migrated to the official Alibaba Cloud SDK; unified multimodal probing; media memory preserved when switching models; default browser start strategy changed to managed CDP; model management redesign; agent config tabs; skill selection improvements.
-- [v1.1.1] Fixed: QQ channel `stop()` no longer blocks for 8 seconds; Windows local model download failure; vLLM `tool_choice` compatibility.
-- [v1.1.1] Contributors: Welcome new contributors: @maplefeng-a, @lhpqaq, @jilin6627-spec.
+  - **[v1.1.8] Added**: Official plugin resources (website download + one-click install from console); QwenPaw Pet desktop companion; CloudPaw Alibaba Cloud deployment plugin; `/make-skill` command; custom HTTP headers & auth mode; per-model context configuration; Inbox batch operations; pinned chat history drawer.
+  - **[v1.1.8] Security**: Backup trust controls; Skill & AgentMd path traversal prevention; plugin API auth.
+  - **[v1.1.8] Fixed**: WeCom/WeChat/QQ channel stability; per-model rate limiter; SSE connection leak.
+  - **[v1.1.8] New Contributors**: @Morxi.
 
-[2026-04-12] **CoPaw is Officially Rebranding to QwenPaw**: This rebranding marks an important step forward into our next phase of open-source development.
+- [2026-05-14] We've released **v1.1.7**! See the full [v1.1.7 Release Notes](https://qwenpaw.agentscope.io/release-notes).
+
+- [2026-05-09] We've released **v1.1.6**! See the full [v1.1.6 Release Notes](https://qwenpaw.agentscope.io/release-notes).
+
+- [2026-04-29] We've released **v1.1.5**! See the full [v1.1.5 Release Notes](https://qwenpaw.agentscope.io/release-notes).
+
+- [2026-04-12] **CoPaw is Officially Rebranding to QwenPaw**: This rebranding marks an important step forward into our next phase of open-source development.
 
 The new name better reflects the open ecosystem we are building and the broader direction we are continuing to pursue:
 
@@ -134,18 +142,6 @@ No Python setup required, one command installs everything. The script will autom
 
 ```bash
 curl -fsSL https://qwenpaw.agentscope.io/install.sh | bash
-```
-
-To install with Ollama support:
-
-```bash
-curl -fsSL https://qwenpaw.agentscope.io/install.sh | bash -s -- --extras ollama
-```
-
-To install with multiple extras (e.g., Ollama + local):
-
-```bash
-curl -fsSL https://qwenpaw.agentscope.io/install.sh | bash -s -- --extras ollama,local
 ```
 
 **Windows (CMD):**
@@ -243,12 +239,13 @@ docker pull agentscope/qwenpaw:latest
 docker run -p 127.0.0.1:8088:8088 \
   -v qwenpaw-data:/app/working \
   -v qwenpaw-secrets:/app/working.secret \
+  -v qwenpaw-backups:/app/working.backups \
   agentscope/qwenpaw:latest
 ```
 
 Also available on Alibaba Cloud Container Registry (ACR) for users in China: `agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/qwenpaw` (same tags).
 
-Then open **http://127.0.0.1:8088/** for the Console. Config, memory, and skills are stored in the `qwenpaw-data` volume; model provider settings and API keys are in the `qwenpaw-secrets` volume. To pass API keys (e.g. `DASHSCOPE_API_KEY`), add `-e VAR=value` or `--env-file .env` to `docker run`.
+Then open **http://127.0.0.1:8088/** for the Console. Config, memory, and skills are stored in the `qwenpaw-data` volume; model provider settings and API keys are in the `qwenpaw-secrets` volume; backup archives are stored in the `qwenpaw-backups` volume. To pass API keys (e.g. `DASHSCOPE_API_KEY`), add `-e VAR=value` or `--env-file .env` to `docker run`.
 
 > **Connecting to Ollama or other services on the host machine**
 >
@@ -260,6 +257,7 @@ Then open **http://127.0.0.1:8088/** for the Console. Config, memory, and skills
 >   --add-host=host.docker.internal:host-gateway \
 >   -v qwenpaw-data:/app/working \
 >   -v qwenpaw-secrets:/app/working.secret \
+>   -v qwenpaw-backups:/app/working.backups \
 >   agentscope/qwenpaw:latest
 > ```
 > Then in QwenPaw **Settings → Models**, change the Base URL to `http://host.docker.internal:<port>` — for example, `http://host.docker.internal:11434` for Ollama, or `http://host.docker.internal:1234/v1` for LM Studio.
@@ -269,11 +267,11 @@ Then open **http://127.0.0.1:8088/** for the Console. Config, memory, and skills
 > docker run --network=host \
 >   -v qwenpaw-data:/app/working \
 >   -v qwenpaw-secrets:/app/working.secret \
+>   -v qwenpaw-backups:/app/working.backups \
 >   agentscope/qwenpaw:latest
 > ```
 > No port mapping (`-p`) is needed; the container shares the host network directly. Note that all container ports are exposed on the host, which may cause conflicts if the port is already in use.
 >
-> **Note:** If you only mount `/app/working` without a separate volume for `/app/working.secret`, the entrypoint will automatically redirect secrets into `/app/working/.secret` so they persist on the same volume.
 
 The image is built from scratch. To build the image yourself, please refer to the [Build Docker image](scripts/README.md#build-docker-image) section in `scripts/README.md`, and then push to your registry.
 
@@ -372,8 +370,10 @@ QwenPaw can run LLMs entirely on your machine — no API keys or cloud services 
 | [Models](https://qwenpaw.agentscope.io/docs/models)                     | Configure cloud, local, and custom providers    |
 | [Channels](https://qwenpaw.agentscope.io/docs/channels)                  | DingTalk, Feishu, QQ, Discord, iMessage, and more |
 | [Skills](https://qwenpaw.agentscope.io/docs/skills)                      | Extend and customize capabilities               |
+| [Plugins](https://qwenpaw.agentscope.io/docs/plugins)                    | Plugin system                                    |
 | [MCP](https://qwenpaw.agentscope.io/docs/mcp)                            | Manage MCP clients                               |
 | [Memory](https://qwenpaw.agentscope.io/docs/memory)                     | Long-term memory                     |
+| [Memory-Evolving & Proactive](https://qwenpaw.agentscope.io/docs/memory-evolving-and-proactive) | Agent memory evolution and proactive interaction |
 | [Context](https://qwenpaw.agentscope.io/docs/context)                   | Context management mechanism                     |
 | [Magic commands](https://qwenpaw.agentscope.io/docs/commands)           | Control conversation state without waiting for the AI |
 | [Heartbeat](https://qwenpaw.agentscope.io/docs/heartbeat)                | Scheduled check-in and digest                    |
@@ -418,21 +418,28 @@ Star QwenPaw on GitHub and be instantly notified of new releases.
 
 ## Roadmap
 
-| Area                                  | Item                                                                                                                                             | Status               |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------- |
-| **Horizontal Expansion**              | More channels, models, skills, MCPs — **community contributions welcome**                                                                        | Seeking Contributors |
-| **Existing Feature Extension**        | Display optimization, download hints, Windows path compatibility, etc. — **community contributions welcome**                                     | Seeking Contributors |
-| **Console Web UI**                    | Expose more info/config in the Console                                                                                                           | In Progress          |
-| **Multi-agent**                      | Agentic Ralph Loop                                                                                  | In Progress          |
-| **Multimodal**                        | Voice/video calls and real-time interaction                                                                                                      | In Progress          |
-| **Small + Large Model Collaboration** | Multi-model routing; different models for different tasks                                                                                          | In Progress          |
-| **Memory System**                     | Experience distillation & skill extraction                                                                                                       | In Progress          |
-|                                       | Memory mechanism switching                                                                                                                       | In Progress             |
-|                                       | Multimodal memory fusion                                                                                                                         | Planned              |
-|                                       | Context-aware proactive delivery                                                                                                                 | Planned              |
-| **Sandbox**                           | Deeper integration with AgentScope Runtime sandboxes                                                                                             | In Progress          |
-| **Cloud-native**                      | Deeper integration with AgentScope Runtime; leverage cloud compute, storage, tools, and skills                                                         | In Progress              |
-| **Skills Hub**                        | Enrich the [AgentScope Skills](https://github.com/agentscope-ai/agentscope-skills) repository and improve discoverability of high-quality skills | Planned              |
+| Area                     | Item                                                                                         | Status               |
+| ------------------------ | -------------------------------------------------------------------------------------------- | -------------------- |
+| **Horizontal Expansion** | More channels, models, skills, MCPs — **community contributions welcome**                  | Seeking Contributors |
+| **Existing Feature Extension** | Display optimization, download hints, Windows path compatibility, etc. — **community contributions welcome** | Seeking Contributors |
+| **Client Experience**    | Install, update, and packaging improvements                                                  | In Progress          |
+| **Models**               | Intelligent on-device / cloud model switching                                                | In Progress          |
+|                          | OAuth                                                                                        | Planned              |
+|                          | Response API                                                                                 | Planned              |
+| **Proactivity**          | Cron jobs and heartbeat upgrades                                                             | In Progress          |
+|                          | Proactive briefings and custom push                                                          | In Progress          |
+|                          | Insight system: discover needs via conversation and interaction                            | Planned              |
+| **Workspace**            | File access control with Sandbox integration                                                 | In Progress          |
+|                          | Subfolder layout (config, production files, etc.)                                            | Planned              |
+| **Coding**               | LSP, dedicated prompts, workspace versioning, runtime, and supporting infra                  | Planned              |
+|                          | Lightweight native APIs                                                                      | Planned              |
+|                          | Tool self-evolution                                                                          | Planned              |
+|                          | Compatibility with existing agents (e.g. Claude Code)                                        | Planned              |
+| **Multi-agent**          | Group chat                                                                                   | Planned              |
+|                          | Subagent                                                                                     | Planned              |
+|                          | HiClaw enterprise capabilities                                                               | Planned              |
+| **Context Management**   | Intelligent context compression                                                              | In Progress          |
+|                          | User-selectable compression (fine-grained control)                                           | Planned              |
 
 
 _Status:_ **In Progress** — actively being worked on; **Planned** — queued or under design, also welcome contributions; **Seeking Contributors** — we strongly encourage community contributions.

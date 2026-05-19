@@ -14,7 +14,7 @@ import base64
 import logging
 import os
 from typing import List, Sequence, Tuple, Type, Any, Union, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from agentscope.formatter import FormatterBase, OpenAIChatFormatter
 from agentscope.model import ChatModelBase, OpenAIChatModel
@@ -49,12 +49,13 @@ from ..token_usage import TokenRecordingModelWrapper
 def _file_url_to_path(url: str) -> str:
     """
     Strip file:// to path. On Windows file:///C:/path -> C:/path not /C:/path.
+    Percent-decodes the path so non-ASCII filenames resolve correctly.
     """
     s = url.removeprefix("file://")
     # Windows: file:///C:/path yields "/C:/path"; remove leading slash.
     if len(s) >= 3 and s.startswith("/") and s[1].isalpha() and s[2] == ":":
         s = s[1:]
-    return s
+    return unquote(s)
 
 
 logger = logging.getLogger(__name__)
@@ -113,9 +114,18 @@ def _normalize_messages_for_formatter(
     supports_multimodal = _supports_multimodal_for_current_model()
     if getattr(formatter_instance, "_qwenpaw_force_strip_media", False):
         supports_multimodal = False
+
+    if is_anthropic_formatter:
+        target_family = "anthropic"
+    elif is_gemini_formatter:
+        target_family = "gemini"
+    else:
+        target_family = "openai"
+
     normalized_msgs = normalize_messages_for_model_request(
         msgs,
         supports_multimodal=supports_multimodal,
+        target_family=target_family,
     )
 
     return normalized_msgs, is_anthropic_formatter, is_gemini_formatter
@@ -212,7 +222,7 @@ def _format_openai_video_block(video_block: dict) -> dict:
         media_type = source["media_type"]
         url = f"data:{media_type};base64,{source['data']}"
     elif source["type"] == "url":
-        raw_url = source["url"].removeprefix("file://")
+        raw_url = _file_url_to_path(source["url"])
         if os.path.exists(raw_url) and os.path.isfile(raw_url):
             ext = os.path.splitext(raw_url)[1].lower()
             media_type = _SUPPORTED_VIDEO_EXTENSIONS.get(ext)
@@ -297,7 +307,7 @@ def _format_anthropic_output_items(
     seen_media: set[str] | None = None,
 ) -> list:
     """Format a list of tool_result output blocks for Anthropic API,
-    converting image and video blocks as needed.
+    converting image, video, and file blocks as needed.
 
     When *seen_media* is provided, media blocks whose source has already
     been encoded in a preceding top-level block are replaced with a
@@ -305,7 +315,30 @@ def _format_anthropic_output_items(
     """
     result: list[dict] = []
     for item in output:
-        if item.get("type") not in ("image", "video"):
+        item_type = item.get("type")
+
+        if item_type == "file":
+            # Anthropic tool_result content only supports 'text' and 'image';
+            # convert file blocks to a readable text placeholder so the
+            # conversation history stays intact without triggering a 400 error.
+            source = item.get("source", {})
+            file_url = source.get("url", "")
+            filename = (
+                item.get("filename")
+                or file_url.rsplit("/", 1)[-1]
+                or "unknown"
+            )
+            readable_path = file_url.removeprefix("file://")
+            result.append(
+                {
+                    "type": "text",
+                    "text": f"File '{filename}' is available at:"
+                    f" {readable_path}",
+                },
+            )
+            continue
+
+        if item_type not in ("image", "video"):
             result.append(item)
             continue
 
@@ -376,7 +409,7 @@ def _format_anthropic_messages(  # pylint: disable=too-many-branches
                 output = block.get("output")
                 if output is None:
                     content_value: list = [
-                        {"type": "text", "text": None},
+                        {"type": "text", "text": ""},
                     ]
                 elif isinstance(output, list):
                     content_value = _format_anthropic_output_items(
@@ -407,7 +440,7 @@ def _format_anthropic_messages(  # pylint: disable=too-many-branches
 
         msg_anthropic: dict = {
             "role": role,
-            "content": content_blocks or None,
+            "content": content_blocks or "",
         }
 
         if msg_anthropic["content"] or msg_anthropic.get(
@@ -553,6 +586,44 @@ def _promote_tool_result_videos(
     return new_messages
 
 
+def _reorder_tool_and_promoted_messages(
+    messages: list[dict],
+) -> list[dict]:
+    """Move promoted user messages after all tool results in a sequence.
+
+    When ``promote_tool_result_images`` is True the upstream formatter
+    inserts a ``role=user`` message after each ``role=tool`` message to
+    carry the promoted image.  The OpenAI / Anthropic APIs require all
+    tool-result messages to appear contiguously after the assistant
+    message.  This helper collects the interleaved user messages and
+    appends them after the last tool message in each sequence.
+    """
+    result: list[dict] = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            result.append(msg)
+            i += 1
+            tool_msgs: list[dict] = []
+            promoted_msgs: list[dict] = []
+            while i < len(messages) and messages[i].get("role") in (
+                "tool",
+                "user",
+            ):
+                if messages[i]["role"] == "tool":
+                    tool_msgs.append(messages[i])
+                else:
+                    promoted_msgs.append(messages[i])
+                i += 1
+            result.extend(tool_msgs)
+            result.extend(promoted_msgs)
+        else:
+            result.append(msg)
+            i += 1
+    return result
+
+
 # Mapping of non-standard MIME subtypes to their correct forms.
 _MIME_FIXES: dict[str, str] = {
     "image/jpg": "image/jpeg",
@@ -580,6 +651,53 @@ def _fix_image_mime_types(messages: list[dict]) -> None:
                         f"data:{right};",
                         1,
                     )
+
+
+_MEDIA_BLOCK_TYPES = ("image", "audio", "video")
+
+
+def _fixup_media_list(items: list) -> None:
+    """Normalize media blocks in a list in-place.
+
+    - Strips ``file://`` prefixes from source URLs.
+    - Replaces media blocks whose local file no longer exists with
+      a text placeholder so the downstream formatter won't throw.
+    - Recurses into ``tool_result`` output lists.
+    """
+    for i, block in enumerate(items):
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype in _MEDIA_BLOCK_TYPES:
+            source = block.get("source")
+            if not (
+                isinstance(source, dict)
+                and source.get("type") == "url"
+                and isinstance(source.get("url"), str)
+            ):
+                continue
+            if source["url"].startswith("file://"):
+                source["url"] = _file_url_to_path(source["url"])
+            url = source["url"]
+            if not url.startswith(
+                ("http://", "https://", "data:"),
+            ) and not os.path.exists(url):
+                logger.warning(
+                    "Media file no longer exists, "
+                    "replacing with placeholder: %s",
+                    url,
+                )
+                items[i] = {
+                    "type": "text",
+                    "text": (
+                        f"[{btype.title()} unavailable"
+                        f" — file deleted from disk]"
+                    ),
+                }
+        elif btype == "tool_result":
+            output = block.get("output")
+            if isinstance(output, list):
+                _fixup_media_list(output)
 
 
 # pylint: disable-next=too-many-statements
@@ -641,18 +759,11 @@ def _create_file_block_support_formatter(
                         extra_contents[block["id"]] = block["extra_content"]
 
             # Convert file:// URLs to paths for all media blocks,
+            # and replace deleted local files with text placeholders.
             # TODO: remove this after AgentScope updated
             for msg in normalized_msgs:
-                for block in msg.get_content_blocks():
-                    if block.get("type") in ("image", "audio", "video"):
-                        source = block.get("source")
-                        if (
-                            isinstance(source, dict)
-                            and source.get("type") == "url"
-                            and isinstance(source.get("url"), str)
-                            and source["url"].startswith("file://")
-                        ):
-                            source["url"] = _file_url_to_path(source["url"])
+                if isinstance(msg.content, list):
+                    _fixup_media_list(msg.content)
 
             # For Anthropic, fully override formatting to handle
             # media blocks (top-level & inside tool_result output).
@@ -688,17 +799,27 @@ def _create_file_block_support_formatter(
                         messages,
                     )
 
+            # Image promotion inserts user messages between tool
+            # results, violating the API's contiguity requirement.
+            messages = _reorder_tool_and_promoted_messages(messages)
+
             # Normalize non-standard MIME types (e.g. image/jpg → image/jpeg)
             _fix_image_mime_types(messages)
 
-            if extra_contents:
+            if extra_contents and _is_gemini_formatter:
                 for message in messages:
                     for tc in message.get("tool_calls", []):
                         ec = extra_contents.get(tc.get("id"))
                         if ec:
                             tc["extra_content"] = ec
 
-            if reasoning_contents:
+            if reasoning_contents and not is_anthropic_formatter:
+                # Anthropic passes thinking blocks natively through
+                # _format_anthropic_messages; injecting reasoning_content
+                # would be redundant and the API doesn't use this field.
+                # OpenAI/Gemini (OpenAI-compat) formatters drop thinking
+                # blocks, so we re-inject the content as reasoning_content.
+                #
                 # Build a list of reasoning values aligned with surviving
                 # assistant messages.  The parent formatter drops
                 # thinking-only messages (no content/tool_calls), so we

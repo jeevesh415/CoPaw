@@ -6,9 +6,13 @@ QwenPaw 提供了插件系统，允许用户扩展 QwenPaw 的功能。
 
 插件系统支持以下扩展能力：
 
-- **自定义 Provider**：添加新的 LLM Provider 和模型
-- **生命周期钩子**：在应用启动/关闭时执行自定义代码
-- **魔法命令**：注册自定义的 `/command` 命令
+- **Provider 插件**：添加新的 LLM Provider 和模型
+- **Hook 插件**：在应用启动/关闭时执行自定义代码
+- **Command 插件**：注册自定义的 `/command` 魔法命令
+- **HTTP API 插件**：通过 FastAPI `APIRouter` 在 `/api` 下暴露自定义 REST 接口
+- **前端页面插件**：向侧边栏添加自定义页面
+- **对话工具渲染插件**：自定义对话工具调用结果的展示方式
+- **修改组件行为**：通过模块注册表修改前端已有组件行为
 
 ## 插件管理
 
@@ -64,86 +68,22 @@ qwenpaw plugin info <plugin-id>
 qwenpaw plugin uninstall <plugin-id>
 ```
 
-## 插件类型
-
-### 1. Provider 插件
-
-添加自定义 LLM Provider，支持新的模型服务。
-
-**示例场景**：
-
-- 接入企业内部的 LLM 服务
-- 支持特定的模型 API
-- 添加自定义的模型配置
-
-**核心 API**：
-
-```python
-api.register_provider(
-    provider_id="my-provider",
-    provider_class=MyProvider,
-    label="My Provider",
-    base_url="https://api.example.com/v1",
-    metadata={},
-)
-```
-
-### 2. Hook 插件
-
-在应用生命周期的特定时刻执行自定义代码。
-
-**示例场景**：
-
-- 初始化第三方服务（如监控、日志）
-- 加载自定义配置
-- 执行启动检查
-
-**核心 API**：
-
-```python
-# 启动钩子
-api.register_startup_hook(
-    hook_name="my_startup",
-    callback=startup_callback,
-    priority=100,  # 越低越先执行
-)
-
-# 关闭钩子
-api.register_shutdown_hook(
-    hook_name="my_shutdown",
-    callback=shutdown_callback,
-    priority=100,
-)
-```
-
-### 3. Command 插件
-
-注册自定义的魔法命令（如 `/feedback`）。
-
-**示例场景**：
-
-- 添加快捷命令
-- 实现特定工作流
-- 集成外部工具
-
-**实现方式**：
-
-通过 monkey patch 改写用户输入，将命令转换为 Agent 可理解的 prompt。
-
 ## 插件开发
 
-### 基本结构
+### 后端插件
+
+#### 基本结构
 
 每个插件至少需要两个文件：
 
 ```
 my-plugin/
 ├── plugin.json      # 插件清单（必需）
-├── plugin.py        # 入口点（必需）
+├── plugin.py        # 入口点（后端必需）
 └── README.md        # 文档（推荐）
 ```
 
-### plugin.json
+#### plugin.json
 
 ```json
 {
@@ -152,14 +92,16 @@ my-plugin/
   "version": "1.0.0",
   "description": "Plugin description",
   "author": "Your Name",
-  "entry_point": "plugin.py",
+  "entry": {
+    "backend": "plugin.py"
+  },
   "dependencies": [],
   "min_version": "0.1.0",
   "meta": {}
 }
 ```
 
-### plugin.py
+#### plugin.py
 
 ```python
 # -*- coding: utf-8 -*-
@@ -194,6 +136,130 @@ class MyPlugin:
 plugin = MyPlugin()
 ```
 
+### 前端插件
+
+#### 基本结构
+
+每个前端插件至少需要以下文件：
+
+```
+my-plugin/
+├── plugin.json      # 插件清单（必需）
+├── src/
+│   └── index.tsx    # 入口点（前端必需）
+├── package.json     # 依赖声明
+├── tsconfig.json    # TypeScript 配置
+└── vite.config.ts   # 构建配置
+```
+
+#### plugin.json
+
+```json
+{
+  "id": "my-plugin",
+  "name": "My Plugin",
+  "version": "1.0.0",
+  "author": "Your Name",
+  "entry": { "frontend": "dist/index.js" }
+}
+```
+
+#### src/index.tsx
+
+```tsx
+const { React, antd } = (window as any).QwenPaw.host;
+
+class MyPlugin {
+  readonly id = "my-plugin";
+
+  setup(): void {
+    // 注册侧边栏页面
+    // (window as any).QwenPaw.registerRoutes?.(this.id, [...]);
+    // 注册工具调用渲染器
+    // (window as any).QwenPaw.registerToolRender?.(this.id, {...});
+    // 访问并修改应用内部模块
+    // const mod = (window as any).QwenPaw?.modules?.['xxxx'];
+  }
+}
+
+new MyPlugin().setup();
+```
+
+#### package.json
+
+```json
+{
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "scripts": { "build": "vite build" },
+  "devDependencies": {
+    "vite": "^5.0.0",
+    "typescript": "^5.0.0",
+    "@vitejs/plugin-react": "^4.0.0"
+  }
+}
+```
+
+#### tsconfig.json
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react",
+    "strict": false,
+    "skipLibCheck": true
+  }
+}
+```
+
+#### vite.config.ts
+
+```ts
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react({ jsxRuntime: "classic" })],
+  build: {
+    lib: {
+      entry: "src/index.tsx",
+      formats: ["es"],
+      fileName: () => "index.js",
+    },
+    rollupOptions: { external: ["react", "react-dom"] },
+  },
+});
+```
+
+#### 构建和安装
+
+```bash
+npm install && npm run build
+cp -r . ~/.qwenpaw/plugins/my-plugin/
+qwenpaw app
+```
+
+**说明**：`window.QwenPaw.host` 提供以下共享库，插件无需自行打包：
+
+| 名称              | 类型                       | 说明               |
+| ----------------- | -------------------------- | ------------------ |
+| `React`           | `typeof React`             | React 运行时       |
+| `antd`            | `typeof antd`              | Ant Design 组件库  |
+| `getApiUrl(path)` | `(path: string) => string` | 构造完整 API URL   |
+| `getApiToken()`   | `() => string`             | 获取当前认证 Token |
+
+**构建说明**：
+
+- `jsxRuntime: "classic"` — 将 JSX 编译为 `React.createElement`，使用宿主提供的 `React`，无需在插件中引入
+- `external: ["react", "react-dom"]` — 不打包 React，使用应用已加载的版本
+
+**`window.QwenPaw.modules`**：应用启动时会将 `src/pages/` 下的所有模块自动注册到此对象，插件可通过模块键名访问并替换内部导出
+
+> ⚠️ **注意**：`modules` 中的模块结构未作为公开 API 维护，可能随版本变化而调整，使用前请确认兼容性。
+
 ## 使用示例
 
 ### 示例 1：添加自定义 Provider
@@ -216,7 +282,9 @@ cd my-llm-provider
   "version": "1.0.0",
   "description": "Custom LLM provider for enterprise",
   "author": "Your Name",
-  "entry_point": "plugin.py",
+  "entry": {
+    "backend": "plugin.py"
+  },
   "dependencies": ["httpx>=0.24.0"],
   "min_version": "0.1.0",
   "meta": {
@@ -352,7 +420,9 @@ cd monitoring-hook
   "version": "1.0.0",
   "description": "Initialize monitoring service at startup",
   "author": "Your Name",
-  "entry_point": "plugin.py",
+  "entry": {
+    "backend": "plugin.py"
+  },
   "dependencies": [],
   "min_version": "0.1.0"
 }
@@ -439,7 +509,9 @@ cd status-command
   "version": "1.0.0",
   "description": "Custom status command",
   "author": "Your Name",
-  "entry_point": "plugin.py",
+  "entry": {
+    "backend": "plugin.py"
+  },
   "dependencies": [],
   "min_version": "0.1.0"
 }
@@ -562,6 +634,406 @@ qwenpaw app
 # 使用命令
 /status
 ```
+
+### 示例 4：添加自定义前端页面
+
+向侧边栏添加一个欢迎页面。
+
+#### 1. 创建插件目录
+
+```bash
+mkdir welcome-plugin && cd welcome-plugin
+```
+
+#### 2. 创建 plugin.json
+
+```json
+{
+  "id": "welcome-plugin",
+  "name": "Welcome Plugin",
+  "version": "1.0.0",
+  "description": "Welcome page plugin",
+  "author": "Your Name",
+  "entry": { "frontend": "dist/index.js" }
+}
+```
+
+#### 3. 创建 src/index.tsx
+
+```tsx
+const { React, antd } = (window as any).QwenPaw.host;
+const { Typography, Card } = antd;
+const { Title, Paragraph } = Typography;
+
+function WelcomePage() {
+  return (
+    <Card style={{ maxWidth: 480, margin: "40px auto" }}>
+      <Title level={2}>Welcome to QwenPaw 👋</Title>
+      <Paragraph>插件系统运行正常！</Paragraph>
+    </Card>
+  );
+}
+
+class WelcomePlugin {
+  readonly id = "welcome-plugin";
+
+  setup(): void {
+    (window as any).QwenPaw.registerRoutes?.(this.id, [
+      {
+        path: "/plugin/welcome-plugin/home",
+        component: WelcomePage,
+        label: "Welcome",
+        icon: "👋",
+        priority: 5,
+      },
+    ]);
+  }
+}
+
+new WelcomePlugin().setup();
+```
+
+#### 4. 创建 package.json
+
+```json
+{
+  "name": "welcome-plugin",
+  "version": "1.0.0",
+  "scripts": { "build": "vite build" },
+  "devDependencies": {
+    "vite": "^5.0.0",
+    "typescript": "^5.0.0",
+    "@vitejs/plugin-react": "^4.0.0"
+  }
+}
+```
+
+#### 5. 创建 tsconfig.json
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react",
+    "strict": false,
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}
+```
+
+#### 6. 创建 vite.config.ts
+
+```ts
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react({ jsxRuntime: "classic" })],
+  build: {
+    lib: {
+      entry: "src/index.tsx",
+      formats: ["es"],
+      fileName: () => "index.js",
+    },
+    rollupOptions: { external: ["react", "react-dom"] },
+  },
+});
+```
+
+#### 7. 构建和安装
+
+```bash
+npm install && npm run build
+cp -r . ~/.qwenpaw/plugins/welcome-plugin/
+qwenpaw app
+```
+
+### 示例 5：自定义工具调用渲染
+
+自定义 Agent 工具调用结果的展示方式。
+
+#### 1. 创建插件目录
+
+```bash
+mkdir tool-render-plugin && cd tool-render-plugin
+```
+
+#### 2. 创建 plugin.json
+
+```json
+{
+  "id": "tool-render-plugin",
+  "name": "Tool Render Plugin",
+  "version": "1.0.0",
+  "description": "Custom tool result renderer",
+  "author": "Your Name",
+  "entry": { "frontend": "dist/index.js" }
+}
+```
+
+#### 3. 创建 src/index.tsx
+
+```tsx
+const { React, antd } = (window as any).QwenPaw.host;
+const { Card } = antd;
+
+function MyToolCard({ result }) {
+  return (
+    <Card style={{ marginTop: 8 }}>
+      <pre>{JSON.stringify(result, null, 2)}</pre>
+    </Card>
+  );
+}
+
+class ToolRenderPlugin {
+  readonly id = "tool-render-plugin";
+
+  setup(): void {
+    (window as any).QwenPaw.registerToolRender?.(this.id, {
+      my_tool_name: MyToolCard, // key = tool name returned by Agent
+    });
+  }
+}
+
+new ToolRenderPlugin().setup();
+```
+
+#### 4. 其他文件
+
+复用示例 4 中的 `package.json`、`tsconfig.json`、`vite.config.ts`，将 `name` 改为 `tool-render-plugin`。
+
+#### 5. 构建和安装
+
+```bash
+npm install && npm run build
+cp -r . ~/.qwenpaw/plugins/tool-render-plugin/
+qwenpaw app
+```
+
+### 示例 6：修改组件行为
+
+我们定制一个对话页面欢迎语
+
+#### 1. 创建插件目录
+
+```bash
+mkdir custom-greeting-plugin && cd custom-greeting-plugin
+```
+
+#### 2. 创建 plugin.json
+
+```json
+{
+  "id": "custom-greeting-plugin",
+  "name": "Custom Greeting",
+  "version": "1.0.0",
+  "description": "Customize chat greeting",
+  "author": "Your Name",
+  "entry": { "frontend": "dist/index.js" }
+}
+```
+
+#### 3. 创建 src/index.tsx
+
+```tsx
+class CustomGreetingPlugin {
+  readonly id = "custom-greeting-plugin";
+
+  setup(): void {
+    const mod = (window as any).QwenPaw?.modules?.[
+      "Chat/OptionsPanel/defaultConfig"
+    ];
+    if (!mod?.configProvider) {
+      console.warn("configProvider not found");
+      return;
+    }
+
+    // 替换聊天欢迎语
+    mod.configProvider.getGreeting = () => "你好！我是定制版 QwenPaw 👋";
+
+    // 替换聊天描述
+    mod.configProvider.getDescription = () => "这是一个定制化的聊天助手";
+
+    // 替换提示词列表
+    mod.configProvider.getPrompts = (t: any) => [
+      { value: "帮我分析这段代码" },
+      { value: "写一个单元测试" },
+      { value: "优化这段逻辑" },
+    ];
+  }
+}
+
+new CustomGreetingPlugin().setup();
+```
+
+#### 4. 其他文件
+
+复用示例 4 中的 `package.json`、`tsconfig.json`、`vite.config.ts`，将 `name` 改为 `custom-greeting-plugin`。
+
+#### 5. 构建和安装
+
+```bash
+npm install && npm run build
+cp -r . ~/.qwenpaw/plugins/custom-greeting-plugin/
+qwenpaw app
+```
+
+### 示例 7：暴露 FastAPI 接口
+
+后端插件可以通过注册 `fastapi.APIRouter` 暴露自己的 HTTP 接口。路由会挂载在
+`/api` 加上你指定的前缀下，与 QwenPaw 核心 API 使用同一个 FastAPI 应用，因此
+共享 CORS、鉴权等设置，并会出现在 `/openapi.json` 与 `/docs` 中。
+
+下面示例增加一个简单的 `/api/pets` 接口：列出宠物，并支持新增。
+
+#### 1. 创建插件目录
+
+```bash
+mkdir pet-api-plugin && cd pet-api-plugin
+```
+
+#### 2. 创建 plugin.json
+
+```json
+{
+  "id": "pet-api-plugin",
+  "name": "Pet API Plugin",
+  "version": "1.0.0",
+  "description": "Expose a small REST API under /api/pets",
+  "author": "Your Name",
+  "entry": {
+    "backend": "plugin.py"
+  },
+  "dependencies": [],
+  "min_version": "1.1.5"
+}
+```
+
+#### 3. 创建 plugin.py
+
+```python
+# -*- coding: utf-8 -*-
+"""Pet API Plugin Entry Point."""
+
+import logging
+from typing import List
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from qwenpaw.plugins.api import PluginApi
+
+logger = logging.getLogger(__name__)
+
+
+class Pet(BaseModel):
+    """Pet model."""
+
+    id: int
+    name: str
+    species: str
+
+
+class PetCreate(BaseModel):
+    """Pet creation payload."""
+
+    name: str
+    species: str
+
+
+_PETS: List[Pet] = [
+    Pet(id=1, name="Mochi", species="cat"),
+    Pet(id=2, name="Bao", species="dog"),
+]
+
+
+def build_router() -> APIRouter:
+    """Build the plugin's APIRouter.
+
+    Routes are mounted under ``/api`` + the prefix passed to
+    ``register_http_router``. With ``prefix="/pets"`` the handlers
+    below are served at ``/api/pets`` and ``/api/pets/{pet_id}``.
+    """
+    router = APIRouter()
+
+    @router.get("", response_model=List[Pet])
+    def list_pets() -> List[Pet]:
+        """Return all pets."""
+        return list(_PETS)
+
+    @router.get("/{pet_id}", response_model=Pet)
+    def get_pet(pet_id: int) -> Pet:
+        """Return a single pet by id."""
+        for pet in _PETS:
+            if pet.id == pet_id:
+                return pet
+        raise HTTPException(status_code=404, detail="Pet not found")
+
+    @router.post("", response_model=Pet, status_code=201)
+    def create_pet(payload: PetCreate) -> Pet:
+        """Create a new pet."""
+        new_id = (max((p.id for p in _PETS), default=0)) + 1
+        pet = Pet(id=new_id, name=payload.name, species=payload.species)
+        _PETS.append(pet)
+        return pet
+
+    return router
+
+
+class PetApiPlugin:
+    """Pet API Plugin."""
+
+    def register(self, api: PluginApi):
+        """Register the HTTP router.
+
+        Args:
+            api: PluginApi instance
+        """
+        logger.info("Registering Pet API plugin...")
+
+        api.register_http_router(
+            build_router(),
+            prefix="/pets",
+            tags=["pets"],
+        )
+
+        logger.info("✓ Pet API registered at /api/pets")
+
+
+# Export plugin instance
+plugin = PetApiPlugin()
+```
+
+#### 4. 安装并试用
+
+```bash
+qwenpaw plugin install pet-api-plugin
+```
+
+启动 QwenPaw 后，可在终端用 `curl` 测试（端口请按你本地实际为准，例如 `8088`）：
+
+```bash
+# 列出全部宠物
+curl http://127.0.0.1:8088/api/pets
+
+# 按 id 查询
+curl http://127.0.0.1:8088/api/pets/1
+
+# 新增宠物（POST 到集合路径 /api/pets）
+curl -X POST http://127.0.0.1:8088/api/pets \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Luna", "species": "rabbit"}'
+```
+
+**说明：**
+
+- `prefix` 必须以 `/` 开头，且不能仅为 `/`，应使用有语义的片段（如 `/pets`）。完整路径恒为 `/api` + 你的 `prefix`。
+- 每个前缀只能被一个插件占用；重复注册相同前缀会抛出 `ValueError`。
+- `tags` 可选；省略时路由在 OpenAPI 中会默认打上 `plugin:<插件 id>` 标签。
+- 插件卸载或禁用时会自动卸载对应路由。
 
 ## 依赖管理
 
@@ -741,6 +1213,21 @@ api.register_shutdown_hook(
 )
 ```
 
+### register_http_router
+
+将 `fastapi.APIRouter` 挂载到 `/api` + _prefix_ 下。
+
+```python
+api.register_http_router(
+    router: APIRouter,             # fastapi.APIRouter 实例
+    *,
+    prefix: str,                   # /api 下的路径，例如 "/pets"
+    tags: Optional[List[str]] = None,  # OpenAPI 标签（可选）
+)
+```
+
+完整步骤见上文「示例 7：暴露 FastAPI 接口」。
+
 ## 高级功能
 
 ### Monkey Patch
@@ -801,6 +1288,7 @@ A: 插件通过 `PluginApi` 访问核心功能，包括：
 
 - Provider 注册
 - Hook 注册
+- HTTP 路由注册（`register_http_router`）
 - Runtime helpers（provider_manager 等）
 
 ### Q: 插件可以修改 QwenPaw 的核心行为吗？
@@ -810,3 +1298,51 @@ A: 可以，通过 monkey patch 或 hook 机制。但请谨慎使用，确保不
 ### Q: 插件之间会冲突吗？
 
 A: 如果多个插件注册相同的 provider_id 或 command_name，后注册的会覆盖先注册的。建议使用唯一的 ID。
+
+## 示例插件
+
+### GPT Image 2 工具插件
+
+一个为 QwenPaw agents 添加 OpenAI GPT Image 2 图片生成能力的工具插件。
+
+**系统要求：**
+
+- QwenPaw 最低版本：`1.1.5`
+
+**安装方法：**
+
+```bash
+# 克隆 QwenPaw 仓库（如果尚未克隆）
+git clone https://github.com/agentscope-ai/QwenPaw.git
+cd QwenPaw
+
+# 安装插件
+qwenpaw plugin install plugins/tool/gpt-image2
+```
+
+**配置步骤：**
+
+1. 安装完成后，重启 QwenPaw
+2. 进入 Agent 设置 → 工具管理
+3. 找到 "generate_image_gpt" 工具
+4. 点击"配置"按钮，输入你的 OpenAI API Key
+5. 启用该工具
+
+**使用方法：**
+
+配置完成后，agent 可以通过调用工具来生成图片：
+
+```
+用户: 请生成一张可爱的小猫在花园里玩耍的图片
+Agent: [调用 generate_image_gpt 工具]
+       [返回生成的图片]
+```
+
+**功能特性：**
+
+- 支持多种图片尺寸：1024x1024, 1024x1792, 1792x1024
+- 质量选项：low, medium, high, auto
+- 自动验证 API Key
+- Per-agent 配置（每个 agent 可以使用不同的 API Key）
+
+更多详情请参考 `plugins/tool/gpt-image2/README.md`。

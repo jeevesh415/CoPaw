@@ -8,6 +8,8 @@ import logging
 import shutil
 from pathlib import Path
 
+from ...constant import SUPPORTED_AGENT_LANGUAGES
+
 logger = logging.getLogger(__name__)
 
 _TEMPLATE_OVERRIDE_FILENAMES = {
@@ -16,6 +18,13 @@ _TEMPLATE_OVERRIDE_FILENAMES = {
     "PROFILE.md",
     "SOUL.md",
 }
+
+
+def normalize_agent_language(language: str) -> str:
+    """Map *language* to a supported agent language"""
+    if language in SUPPORTED_AGENT_LANGUAGES:
+        return language
+    return "en"
 
 
 def copy_md_files(
@@ -27,7 +36,7 @@ def copy_md_files(
     """Copy md files from agents/md_files to working directory.
 
     Args:
-        language: Language code (e.g. 'en', 'zh')
+        language: Supported agent language code.
         skip_existing: If True, skip files that already exist in working dir.
         workspace_dir: Target workspace directory. If None, uses WORKING_DIR.
         exclude_filenames: File names to skip while copying.
@@ -181,11 +190,12 @@ def copy_template_md_files(
     """Copy template-specific markdown files into an agent workspace.
 
     Files are read from ``md_files/<template_id>/<language>/`` with fallback
-    order ``language`` → ``en`` → ``zh`` → ``ru`` on a per-file basis.
+    order ``language`` then the built-in fallback languages on a
+    per-file basis.
 
     Args:
         template_id: Template directory name under ``agents/md_files``.
-        language: Language code (en/zh/ru).
+        language: Supported agent language code.
         workspace_dir: Agent workspace root.
         only_if_missing: If True, skip targets that already exist.
 

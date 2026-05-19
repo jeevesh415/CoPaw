@@ -8,11 +8,13 @@ import { Button, Modal, Result, Tooltip } from "antd";
 import { useAppMessage } from "../../hooks/useAppMessage";
 import { ExclamationCircleOutlined, SettingOutlined } from "@ant-design/icons";
 import { SparkCopyLine, SparkAttachmentLine } from "@agentscope-ai/icons";
+import { usePlugins } from "../../plugins/PluginContext";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
 import sessionApi from "./sessionApi";
 import defaultConfig, { getDefaultConfig } from "./OptionsPanel/defaultConfig";
 import { chatApi } from "../../api/modules/chat";
+import { agentApi } from "../../api/modules/agent";
 import { getApiUrl } from "../../api/config";
 import { buildAuthHeaders } from "../../api/authHeaders";
 import { providerApi } from "../../api/modules/provider";
@@ -26,6 +28,29 @@ import { IconButton } from "@agentscope-ai/design";
 import ChatActionGroup from "./components/ChatActionGroup";
 import ChatHeaderTitle from "./components/ChatHeaderTitle";
 import ChatSessionInitializer from "./components/ChatSessionInitializer";
+import { ApprovalCard } from "../../components/ApprovalCard/ApprovalCard";
+import { commandsApi } from "../../api/modules/commands";
+import { useApprovalContext } from "../../contexts/ApprovalContext";
+import { planApi } from "../../api/modules/plan";
+
+interface ApprovalMessageData {
+  requestId: string;
+  sessionId: string;
+  rootSessionId?: string;
+  agentId: string;
+  toolName: string;
+  severity: string;
+  findingsCount: number;
+  findingsSummary: string;
+  toolParams: Record<string, unknown>;
+  createdAt: number;
+  timeoutSeconds: number;
+}
+
+import WhisperSpeechButton, {
+  WhisperSpeechButtonRef,
+} from "./components/WhisperSpeechButton";
+
 import {
   toDisplayUrl,
   copyText,
@@ -133,11 +158,13 @@ function useIMEComposition(isChatActive: () => boolean) {
 
     const handleCompositionEnd = () => {
       if (!isChatActive()) return;
-      // Use a slightly longer delay for Safari on macOS, which fires keydown
-      // after compositionend within the same event loop tick.
+      // Small delay for Safari on macOS, which fires keydown after
+      // compositionend within the same event loop tick.  Keep this as
+      // short as possible so fast typists who hit Space+Enter in quick
+      // succession are not blocked.
       setTimeout(() => {
         isComposingRef.current = false;
-      }, 200);
+      }, 50);
     };
 
     const suppressImeEnter = (e: KeyboardEvent) => {
@@ -193,7 +220,29 @@ function useMultimodalCapabilities(
     supportsVideo: boolean;
   }>({ supportsMultimodal: false, supportsImage: false, supportsVideo: false });
 
+  const updateCapsIfChanged = useCallback(
+    (next: {
+      supportsMultimodal: boolean;
+      supportsImage: boolean;
+      supportsVideo: boolean;
+    }) => {
+      setMultimodalCaps((prev) =>
+        prev.supportsMultimodal === next.supportsMultimodal &&
+        prev.supportsImage === next.supportsImage &&
+        prev.supportsVideo === next.supportsVideo
+          ? prev
+          : next,
+      );
+    },
+    [],
+  );
+
   const fetchMultimodalCaps = useCallback(async () => {
+    const noCaps = {
+      supportsMultimodal: false,
+      supportsImage: false,
+      supportsVideo: false,
+    };
     try {
       const [providers, activeModels] = await Promise.all([
         providerApi.listProviders(),
@@ -205,22 +254,14 @@ function useMultimodalCapabilities(
       const activeProviderId = activeModels?.active_llm?.provider_id;
       const activeModelId = activeModels?.active_llm?.model;
       if (!activeProviderId || !activeModelId) {
-        setMultimodalCaps({
-          supportsMultimodal: false,
-          supportsImage: false,
-          supportsVideo: false,
-        });
+        updateCapsIfChanged(noCaps);
         return;
       }
       const provider = (providers as ProviderInfo[]).find(
         (p) => p.id === activeProviderId,
       );
       if (!provider) {
-        setMultimodalCaps({
-          supportsMultimodal: false,
-          supportsImage: false,
-          supportsVideo: false,
-        });
+        updateCapsIfChanged(noCaps);
         return;
       }
       const allModels: ModelInfo[] = [
@@ -228,19 +269,15 @@ function useMultimodalCapabilities(
         ...(provider.extra_models ?? []),
       ];
       const model = allModels.find((m) => m.id === activeModelId);
-      setMultimodalCaps({
+      updateCapsIfChanged({
         supportsMultimodal: model?.supports_multimodal ?? false,
         supportsImage: model?.supports_image ?? false,
         supportsVideo: model?.supports_video ?? false,
       });
     } catch {
-      setMultimodalCaps({
-        supportsMultimodal: false,
-        supportsImage: false,
-        supportsVideo: false,
-      });
+      updateCapsIfChanged(noCaps);
     }
-  }, [selectedAgent]);
+  }, [selectedAgent, updateCapsIfChanged]);
 
   // Fetch caps on mount and whenever refreshKey changes
   useEffect(() => {
@@ -274,16 +311,33 @@ function useMessageHistoryNavigation(
   const historyIndexRef = useRef<number>(-1);
   const draftRef = useRef<string>("");
 
+  /** Cached user messages to avoid re-computing on every keydown */
+  const userMessagesCacheRef = useRef<string[]>([]);
+  const cachedMessageCountRef = useRef<number>(0);
+
   const getUserMessagesWithText = useCallback((): string[] => {
     if (!chatRef.current?.messages?.getMessages) return [];
 
     const allMessages = chatRef.current.messages.getMessages();
     if (!Array.isArray(allMessages)) return [];
 
-    return allMessages
+    const currentCount = allMessages.length;
+    if (
+      userMessagesCacheRef.current.length > 0 &&
+      cachedMessageCountRef.current === currentCount
+    ) {
+      return userMessagesCacheRef.current;
+    }
+
+    const userMessages = allMessages
       .filter((msg) => msg.role === "user")
       .map((msg) => extractTextFromMessage(msg))
       .filter((text) => text.trim().length > 0);
+
+    userMessagesCacheRef.current = userMessages;
+    cachedMessageCountRef.current = currentCount;
+
+    return userMessages;
   }, [chatRef]);
 
   interface MessageResult {
@@ -316,9 +370,13 @@ function useMessageHistoryNavigation(
     return null;
   };
 
+  const isSuggestionPopupOpen = (textarea: HTMLTextAreaElement): boolean =>
+    textarea.value.startsWith("/");
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!isChatActive()) return;
+      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
 
       const target = e.target as HTMLElement;
       const isChatSender =
@@ -336,6 +394,8 @@ function useMessageHistoryNavigation(
       const userMessages = getUserMessagesWithText();
 
       if (e.key === "ArrowUp") {
+        if (isSuggestionPopupOpen(textarea)) return;
+
         const cursorPosition = textarea.selectionStart || 0;
         const textBeforeCursor = textarea.value.substring(0, cursorPosition);
         const lineBreaks = textBeforeCursor.split("\n").length - 1;
@@ -448,15 +508,167 @@ export default function ChatPage() {
   }, [location.pathname]);
   const [showModelPrompt, setShowModelPrompt] = useState(false);
   const { selectedAgent } = useAgentStore();
+  const { toolRenderConfig } = usePlugins();
   const [refreshKey, setRefreshKey] = useState(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
   const { message } = useAppMessage();
+  const { approvals, setApprovals } = useApprovalContext();
+  const [approvalRequests, setApprovalRequests] = useState<
+    Map<string, ApprovalMessageData>
+  >(new Map());
+  const [planEnabled, setPlanEnabled] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    planApi
+      .getPlanConfig()
+      .then((cfg) => {
+        if (!cancelled) setPlanEnabled(cfg.enabled);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAgent]);
 
   const isChatActiveRef = useRef(false);
   isChatActiveRef.current =
     location.pathname === "/" || location.pathname.startsWith("/chat");
 
   const isChatActive = useCallback(() => isChatActiveRef.current, []);
+
+  // Consume approvals from Context and filter by current session.
+  // Uses a serialized key to avoid creating a new Map (and triggering
+  // re-renders of the entire Chat tree) when the filtered result is identical.
+  const prevApprovalKeyRef = useRef("");
+
+  useEffect(() => {
+    const currentSessionId = window.currentSessionId || chatId || "";
+
+    // When no session ID is available yet, use the first approval's
+    // root_session_id as a hint (handles the race where approval arrives
+    // before the session ID is propagated).
+    let effectiveSessionId = currentSessionId;
+    if (!effectiveSessionId && approvals.length > 0) {
+      effectiveSessionId = approvals[0].root_session_id;
+    }
+
+    const sessionApprovals = effectiveSessionId
+      ? approvals.filter(
+          (approval) => approval.root_session_id === effectiveSessionId,
+        )
+      : approvals;
+
+    // Build a stable key from the filtered request IDs so we can skip
+    // the Map rebuild when nothing changed (avoids re-render every 2.5s poll).
+    const approvalKey = sessionApprovals
+      .map((a) => a.request_id)
+      .sort()
+      .join(",");
+
+    if (approvalKey === prevApprovalKeyRef.current) return;
+    prevApprovalKeyRef.current = approvalKey;
+
+    const newMap = new Map<string, ApprovalMessageData>();
+    for (const approval of sessionApprovals) {
+      newMap.set(approval.request_id, {
+        requestId: approval.request_id,
+        sessionId: approval.session_id,
+        rootSessionId: approval.root_session_id,
+        agentId: approval.agent_id,
+        toolName: approval.tool_name,
+        severity: approval.severity,
+        findingsCount: approval.findings_count,
+        findingsSummary: approval.findings_summary,
+        toolParams: approval.tool_params,
+        createdAt: approval.created_at,
+        timeoutSeconds: approval.timeout_seconds,
+      });
+    }
+
+    setApprovalRequests(newMap);
+  }, [approvals, chatId]);
+
+  const handleApprove = useCallback(
+    async (requestId: string) => {
+      const request = approvalRequests.get(requestId);
+      if (!request) return;
+
+      const rootSessionId = window.currentSessionId || chatId || "";
+
+      try {
+        const cardElement = document.querySelector(
+          `[data-approval-id="${requestId}"]`,
+        );
+        if (cardElement) {
+          cardElement.classList.add("approvalCardExit");
+        }
+
+        await commandsApi.sendApprovalCommand(
+          "approve",
+          requestId,
+          rootSessionId,
+        );
+        setApprovals((prev) =>
+          prev.filter((item) => item.request_id !== requestId),
+        );
+        message.success(t("approval.approved"));
+
+        // Delay removal to let exit animation complete
+        setTimeout(() => {
+          setApprovalRequests((prev) => {
+            const next = new Map(prev);
+            next.delete(requestId);
+            return next;
+          });
+        }, 300);
+      } catch (error) {
+        message.error(t("approval.approveFailed"));
+        console.error("Failed to approve:", error);
+      }
+    },
+    [approvalRequests, chatId, t, message, setApprovals],
+  );
+
+  const handleDeny = useCallback(
+    async (requestId: string) => {
+      const request = approvalRequests.get(requestId);
+      if (!request) return;
+
+      // Use currentSessionId (root session) instead of request.sessionId (sub-agent session)
+      const rootSessionId = window.currentSessionId || chatId || "";
+
+      try {
+        // Add exit animation class
+        const cardElement = document.querySelector(
+          `[data-approval-id="${requestId}"]`,
+        );
+        if (cardElement) {
+          cardElement.classList.add("approvalCardExit");
+        }
+
+        await commandsApi.sendApprovalCommand("deny", requestId, rootSessionId);
+        setApprovals((prev) =>
+          prev.filter((item) => item.request_id !== requestId),
+        );
+        message.success(t("approval.denied"));
+
+        // Delay removal to let animation complete
+        // Backend will remove from pending list, next poll will update UI
+        setTimeout(() => {
+          setApprovalRequests((prev) => {
+            const next = new Map(prev);
+            next.delete(requestId);
+            return next;
+          });
+        }, 300); // Match animation duration
+      } catch (error) {
+        message.error(t("approval.denyFailed"));
+        console.error("Failed to deny:", error);
+      }
+    },
+    [approvalRequests, chatId, t, message, setApprovals],
+  );
 
   // Use custom hooks for better separation of concerns
   const isComposingRef = useIMEComposition(isChatActive);
@@ -474,8 +686,53 @@ export default function ChatPage() {
   const navigateRef = useRef(navigate);
   const chatRef = useRef<IAgentScopeRuntimeWebUIRef>(null);
   const pendingClearHistoryRef = useRef(false);
+  const whisperSpeechRef = useRef<WhisperSpeechButtonRef>(null);
+  const [whisperEnabled, setWhisperEnabled] = useState(false);
+
+  // Check if Whisper transcription is configured
+  useEffect(() => {
+    agentApi
+      .getTranscriptionProviderType()
+      .then((res) => {
+        setWhisperEnabled(res.transcription_provider_type !== "disabled");
+      })
+      .catch(() => setWhisperEnabled(false));
+  }, []);
+
+  const handleWhisperTranscription = useCallback((text: string) => {
+    const senderContainer = document.querySelector('[class*="sender"]');
+    const textarea = senderContainer?.querySelector(
+      "textarea",
+    ) as HTMLTextAreaElement | null;
+    if (textarea) {
+      const currentValue = textarea.value || "";
+      const newValue = currentValue ? `${currentValue} ${text}` : text;
+      setTextareaValue(textarea, newValue);
+      textarea.focus();
+    }
+  }, []);
 
   useMessageHistoryNavigation(chatRef, isChatActive, isComposingRef);
+
+  // Shortcut key for voice recording (Ctrl+Shift+M or Cmd+Shift+M on Mac)
+  useEffect(() => {
+    const handleShortcut = (e: KeyboardEvent) => {
+      if (!isChatActive()) return;
+      // Check for Ctrl+Shift+M (Windows/Linux) or Cmd+Shift+M (Mac)
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.shiftKey &&
+        e.key.toLowerCase() === "m"
+      ) {
+        e.preventDefault();
+        if (whisperEnabled) {
+          whisperSpeechRef.current?.toggleRecording();
+        }
+      }
+    };
+    document.addEventListener("keydown", handleShortcut);
+    return () => document.removeEventListener("keydown", handleShortcut);
+  }, [isChatActive, whisperEnabled]);
   chatIdRef.current = chatId;
   navigateRef.current = navigate;
 
@@ -748,21 +1005,23 @@ export default function ChatPage() {
         description: t("chat.commands.compact.description"),
       },
       {
-        command: "/approve",
-        value: "approve",
-        description: t("chat.commands.approve.description"),
-      },
-      {
-        command: "/deny",
-        value: "deny",
-        description: t("chat.commands.deny.description"),
-      },
-      {
         command: "/mission",
         value: "mission",
         description: t("chat.commands.mission.description"),
       },
+      {
+        command: "/skills",
+        value: "skills",
+        description: t("chat.commands.skills.description"),
+      },
     ];
+    if (planEnabled) {
+      commandSuggestions.push({
+        command: "/plan",
+        value: "plan ",
+        description: t("chat.commands.plan.description"),
+      });
+    }
 
     const handleBeforeSubmit = async () => {
       if (isComposingRef.current) return false;
@@ -784,21 +1043,27 @@ export default function ChatPage() {
             <ChatHeaderTitle />
             <span style={{ flex: 1 }} />
             <ModelSelector />
-            <ChatActionGroup />
+            <ChatActionGroup planEnabled={planEnabled} />
           </>
         ),
       },
       welcome: {
         ...i18nConfig.welcome,
         nick: "QwenPaw",
-        avatar:
-          "https://gw.alicdn.com/imgextra/i2/O1CN01pyXzjQ1EL1PuZMlSd_!!6000000000334-2-tps-288-288.png",
+        avatar: "/qwenpaw.png",
       },
       sender: {
         ...(i18nConfig as any)?.sender,
         beforeSubmit: handleBeforeSubmit,
-        allowSpeech: true,
+        allowSpeech: !whisperEnabled,
+        prefix: whisperEnabled ? (
+          <WhisperSpeechButton
+            ref={whisperSpeechRef}
+            onTranscription={handleWhisperTranscription}
+          />
+        ) : undefined,
         attachments: {
+          multiple: true,
           trigger: function (props: any) {
             const tooltipKey = multimodalCaps.supportsMultimodal
               ? multimodalCaps.supportsImage && !multimodalCaps.supportsVideo
@@ -833,6 +1098,7 @@ export default function ChatPage() {
         fetch: customFetch,
         responseParser: (chunk: string) => {
           const payload = JSON.parse(chunk) as Record<string, unknown>;
+
           if (payloadRequestsHistoryClear(payload)) {
             pendingClearHistoryRef.current = true;
             if (payloadCompletesResponse(payload)) {
@@ -845,10 +1111,10 @@ export default function ChatPage() {
           return toDisplayUrl(url);
         },
         cancel(data: { session_id: string }) {
-          const chatId =
+          const resolvedChatId =
             sessionApi.getRealIdForSession(data.session_id) ?? data.session_id;
-          if (chatId) {
-            chatApi.stopChat(chatId).catch((err) => {
+          if (resolvedChatId) {
+            chatApi.stopChat(resolvedChatId).catch((err) => {
               console.error("Failed to stop chat:", err);
             });
           }
@@ -872,6 +1138,8 @@ export default function ChatPage() {
           });
         },
       },
+      customToolRenderConfig:
+        Object.keys(toolRenderConfig).length > 0 ? toolRenderConfig : undefined,
       actions: {
         list: [
           {
@@ -895,7 +1163,9 @@ export default function ChatPage() {
     t,
     isDark,
     multimodalCaps,
+    toolRenderConfig,
     scheduleHistoryClear,
+    planEnabled,
   ]);
 
   return (
@@ -914,6 +1184,66 @@ export default function ChatPage() {
           options={options}
         />
       </div>
+
+      {/* Render approval cards as overlays */}
+      {Array.from(approvalRequests.values()).map((request) => (
+        <div
+          key={request.requestId}
+          data-approval-id={request.requestId}
+          style={{
+            position: "fixed",
+            bottom: 80,
+            right: 24,
+            zIndex: 1000,
+            maxWidth: 480,
+            width: "calc(100vw - 48px)",
+          }}
+        >
+          <ApprovalCard
+            requestId={request.requestId}
+            agentId={request.agentId}
+            toolName={request.toolName}
+            severity={request.severity}
+            findingsCount={request.findingsCount}
+            findingsSummary={request.findingsSummary}
+            toolParams={request.toolParams}
+            createdAt={request.createdAt}
+            timeoutSeconds={request.timeoutSeconds}
+            sessionId={request.sessionId}
+            rootSessionId={request.rootSessionId}
+            onApprove={handleApprove}
+            onDeny={handleDeny}
+            onCancel={() => {
+              const sessionId =
+                request.rootSessionId || window.currentSessionId || "";
+              const resolvedChatId =
+                sessionApi.getRealIdForSession(sessionId) ??
+                chatIdRef.current ??
+                sessionId;
+
+              if (resolvedChatId) {
+                console.log("[Chat] Calling stopChat with:", resolvedChatId);
+                chatApi
+                  .stopChat(resolvedChatId)
+                  .then(() => {
+                    console.log("[Chat] stopChat succeeded");
+                    setApprovals((prev) =>
+                      prev.filter(
+                        (item) =>
+                          item.root_session_id !== request.rootSessionId,
+                      ),
+                    );
+                  })
+                  .catch((err) => {
+                    console.error("[Chat] stopChat failed:", err);
+                  });
+              } else {
+                console.warn("[Chat] No chat_id resolved, cannot cancel task");
+              }
+            }}
+          />
+        </div>
+      ))}
 
       <Modal
         open={showModelPrompt}

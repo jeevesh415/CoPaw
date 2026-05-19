@@ -26,6 +26,7 @@ from ..utils.console_static import (
     CONSOLE_STATIC_ENV,
     resolve_console_static_dir,
 )
+from ..utils.http import trust_env_for_url
 from ..utils.system_info import summarize_python_environment
 from .doctor_checks import (
     active_llm_local_failure_hint,
@@ -52,6 +53,7 @@ from .doctor_checks import (
     qwenpaw_local_llm_deep_notes,
     startup_extra_volume_disk_notes,
     workspace_hygiene_notes,
+    windows_environment_lines,
 )
 from .doctor_connectivity import collect_deep_channel_connectivity_notes
 from .doctor_registry import DoctorRunContext, run_extension_contributions
@@ -63,6 +65,15 @@ def _doctor_fix_hint(message: str) -> None:
     click.echo(f"Hint: {message}", err=True)
 
 
+def _is_console_static_positive_note(line: str) -> bool:
+    """Whether a console-static context line should be shown as OK."""
+    if line.startswith("resolved static dir:"):
+        return "index.html present" in line
+    if line.startswith("npm on PATH:"):
+        return "not found" not in line
+    return False
+
+
 def _same_python_executable(a: str, b: str) -> bool:
     try:
         return os.path.samefile(a, b)
@@ -71,6 +82,11 @@ def _same_python_executable(a: str, b: str) -> bool:
             return Path(a).resolve() == Path(b).resolve()
         except OSError:
             return a == b
+
+
+def _http_get(url: str, **kwargs) -> httpx.Response:
+    kwargs.setdefault("trust_env", trust_env_for_url(url))
+    return httpx.get(url, **kwargs)
 
 
 def _fetch_running_server_python(
@@ -104,7 +120,7 @@ def _fetch_running_server_python(
         )
 
     try:
-        runtime_resp = httpx.get(runtime_url, timeout=timeout)
+        runtime_resp = _http_get(runtime_url, timeout=timeout)
     except httpx.RequestError as exc:
         return None, None, f"(not available: {exc})"
     if runtime_resp.status_code == 200:
@@ -384,6 +400,12 @@ def run_doctor_checks(
     )
     if mismatch:
         click.echo(click.style("Note:", fg="yellow") + f" {mismatch}")
+
+    win_lines = windows_environment_lines()
+    if win_lines:
+        click.echo("\n=== Windows environment ===")
+        for line in win_lines:
+            click.echo(f"  {line}")
 
     click.echo("\n=== Config ===")
     config_ok, detail = strict_validate_config_file()
@@ -732,7 +754,10 @@ def run_doctor_checks(
             "copies dist → bundled console).",
         )
     for line in console_static_diagnostic_notes():
-        click.echo(click.style("Note:", fg="yellow") + f" {line}")
+        if _is_console_static_positive_note(line):
+            click.echo(click.style("OK", fg="green") + f" — {line}")
+        else:
+            click.echo(click.style("Note:", fg="yellow") + f" {line}")
 
     click.echo("\n=== Web authentication ===")
     auth_ok, detail = _check_web_auth(base)
@@ -821,7 +846,7 @@ def run_doctor_checks(
     health_url = f"{base}/api/agent/health"
     version_url = f"{base}/api/version"
     try:
-        health_resp = httpx.get(health_url, timeout=timeout)
+        health_resp = _http_get(health_url, timeout=timeout)
     except httpx.RequestError as exc:
         failed = True
         click.echo(
@@ -848,7 +873,7 @@ def run_doctor_checks(
             )
 
         try:
-            version_resp = httpx.get(version_url, timeout=timeout)
+            version_resp = _http_get(version_url, timeout=timeout)
         except httpx.RequestError as exc:
             failed = True
             click.echo(
@@ -892,7 +917,7 @@ def run_doctor_checks(
 
         if health_resp.status_code == 200:
             try:
-                root_resp = httpx.get(
+                root_resp = _http_get(
                     f"{base}/",
                     timeout=timeout,
                     follow_redirects=True,

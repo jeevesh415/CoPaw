@@ -3,13 +3,15 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
+import os
 import time
 from typing import TYPE_CHECKING, Any, List
 
 from agentscope.model import ChatModelBase
-from openai import APIError, AsyncOpenAI
+from openai import APIError
 
 from qwenpaw.providers.provider import ModelInfo, Provider
 
@@ -18,19 +20,45 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DASHSCOPE_BASE_URLS = (
+    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    "https://dashscope-us.aliyuncs.com/compatible-mode/v1",
+)
 CODING_DASHSCOPE_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1"
+TOKEN_PLAN_BASE_URL = (
+    "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+)
+
+if os.environ.get("LANGFUSE_SECRET_KEY") and importlib.util.find_spec(
+    "langfuse",
+):
+    from langfuse.openai import AsyncOpenAI  # type: ignore[import]
+else:
+    if os.environ.get("LANGFUSE_SECRET_KEY"):
+        logger.warning(
+            "LANGFUSE_SECRET_KEY is set but langfuse is not installed; "
+            "install with `pip install langfuse` to enable tracing",
+        )
+    from openai import AsyncOpenAI  # pylint: disable=ungrouped-imports
 
 
 class OpenAIProvider(Provider):
     """Provider implementation for OpenAI API and compatible endpoints."""
 
+    def _build_default_headers(self) -> dict:
+        return dict(self.custom_headers) if self.custom_headers else {}
+
     def _client(self, timeout: float = 5) -> AsyncOpenAI:
-        return AsyncOpenAI(
-            base_url=self.base_url,
-            api_key=self.api_key,
-            timeout=timeout,
-        )
+        kwargs: dict = {
+            "base_url": self.base_url,
+            "api_key": self.api_key,
+            "timeout": timeout,
+        }
+        headers = self._build_default_headers()
+        if headers:
+            kwargs["default_headers"] = headers
+        return AsyncOpenAI(**kwargs)
 
     @staticmethod
     def _normalize_models_payload(payload: Any) -> List[ModelInfo]:
@@ -56,8 +84,6 @@ class OpenAIProvider(Provider):
 
     async def check_connection(self, timeout: float = 5) -> tuple[bool, str]:
         """Check if OpenAI provider is reachable with current configuration."""
-        if self.base_url == CODING_DASHSCOPE_BASE_URL:
-            return True, ""
         client = self._client()
         try:
             await client.models.list(timeout=timeout)
@@ -108,7 +134,7 @@ class OpenAIProvider(Provider):
                     },
                 ],
                 timeout=timeout,
-                max_tokens=1,
+                max_tokens=20,
                 stream=True,
             )
             # consume the stream to ensure the model is actually responsive
@@ -126,32 +152,35 @@ class OpenAIProvider(Provider):
     def get_chat_model_instance(self, model_id: str) -> ChatModelBase:
         from .openai_chat_model_compat import OpenAIChatModelCompat
 
-        client_kwargs = {"base_url": self.base_url}
+        client_kwargs: dict = {"base_url": self.base_url}
 
-        if self.base_url == DASHSCOPE_BASE_URL:
-            client_kwargs["default_headers"] = {
-                "x-dashscope-agentapp": json.dumps(
-                    {
-                        "agentType": "QwenPaw",
-                        "deployType": "UnKnown",
-                        "moduleCode": "model",
-                        "agentCode": "UnKnown",
-                    },
-                    ensure_ascii=False,
-                ),
-            }
-        elif self.base_url == CODING_DASHSCOPE_BASE_URL:
-            client_kwargs["default_headers"] = {
-                "X-DashScope-Cdpl": json.dumps(
-                    {
-                        "agentType": "QwenPaw",
-                        "deployType": "UnKnown",
-                        "moduleCode": "model",
-                        "agentCode": "UnKnown",
-                    },
-                    ensure_ascii=False,
-                ),
-            }
+        # Start with user-defined custom headers, then layer platform-specific
+        # headers on top so required service headers are always present.
+        merged_headers = self._build_default_headers()
+
+        if self.base_url in DASHSCOPE_BASE_URLS:
+            merged_headers["x-dashscope-agentapp"] = json.dumps(
+                {
+                    "agentType": "QwenPaw",
+                    "deployType": "UnKnown",
+                    "moduleCode": "model",
+                    "agentCode": "UnKnown",
+                },
+                ensure_ascii=False,
+            )
+        elif self.base_url in (CODING_DASHSCOPE_BASE_URL, TOKEN_PLAN_BASE_URL):
+            merged_headers["X-DashScope-Cdpl"] = json.dumps(
+                {
+                    "agentType": "QwenPaw",
+                    "deployType": "UnKnown",
+                    "moduleCode": "model",
+                    "agentCode": "UnKnown",
+                },
+                ensure_ascii=False,
+            )
+
+        if merged_headers:
+            client_kwargs["default_headers"] = merged_headers
 
         return OpenAIChatModelCompat(
             model_name=model_id,
@@ -165,7 +194,8 @@ class OpenAIProvider(Provider):
     async def probe_model_multimodal(
         self,
         model_id: str,
-        timeout: float = 10,
+        timeout: float = 60,
+        image_only: bool = False,
     ) -> ProbeResult:
         """Probe multimodal support via OpenAI-compatible API."""
         from .multimodal_prober import ProbeResult
@@ -184,6 +214,13 @@ class OpenAIProvider(Provider):
                 supports_video=False,
                 image_message=img_msg,
                 video_message="Skipped: image probe failed",
+            )
+        if image_only:
+            return ProbeResult(
+                supports_image=img_ok,
+                supports_video=False,
+                image_message=img_msg,
+                video_message="Skipped: image_only=True",
             )
         vid_ok, vid_msg = await self._probe_video_support(
             model_id,

@@ -577,6 +577,11 @@
   }
 }
 
+.slotActionField {
+  flex: 0 0 auto;
+  min-width: 120px;
+}
+
 .slotLabel {
   font-size: 14px;
   color: #666;
@@ -584,6 +589,10 @@
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.visuallyHiddenLabel {
+  visibility: hidden;
 }
 
 .slotActions {
@@ -1467,8 +1476,16 @@
     border-top-color: rgba(255, 255, 255, 0.08);
   }
 
+  .localAdvancedConfigSection {
+    border-top-color: rgba(255, 255, 255, 0.08);
+  }
+
   .advancedConfigToggle {
     color: rgba(255, 255, 255, 0.65);
+  }
+
+  .localAdvancedConfigLabel {
+    color: rgba(255, 255, 255, 0.88);
   }
 
   /* JSON editor */
@@ -1564,5 +1581,53 @@
 
   .infoEmpty {
     color: rgba(255, 255, 255, 0.3);
+  }
+}
+
+/* ---- Custom Headers Editor ---- */
+.customHeadersSection {
+  margin-bottom: 8px;
+}
+
+.customHeaderRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+
+  .customHeaderKey {
+    flex: 0 0 38%;
+  }
+
+  .customHeaderValue {
+    flex: 1;
+  }
+
+  .customHeaderDelete {
+    flex: 0 0 auto;
+    color: #999;
+    cursor: pointer;
+    transition: color 0.2s;
+
+    &:hover {
+      color: #ff4d4f;
+    }
+  }
+}
+
+.addHeaderBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  height: auto;
+  font-size: 13px;
+  color: var(--ant-color-primary, #1677ff);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+
+  &:hover {
+    opacity: 0.8;
   }
 }

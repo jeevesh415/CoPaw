@@ -40,6 +40,8 @@
 >
 > **全域触达** — 钉钉、飞书、微信、Discord、Telegram 等频道，一个 QwenPaw 按需连接。
 >
+> **记忆进化与主动交互** — 智能体从交互中学习、反思经验、主动服务，越用越聪明。
+>
 > <details>
 > <summary><b>你可以用 QwenPaw 做什么</b></summary>
 >
@@ -58,14 +60,20 @@
 
 ## 新闻
 
-[2026-04-14] 我们发布了 v1.1.1！完整更新说明见 [v1.1.1 发布说明](https://qwenpaw.agentscope.io/release-notes)。
+- [2026-05-19] 我们发布了 **v1.1.8**！完整更新说明见 [v1.1.8 发布说明](https://qwenpaw.agentscope.io/release-notes)。
 
-- [v1.1.1] 新增：OpenRouter 和 OpenCode 模型供应商；添加模型时模型 ID 自动补全，所有供应商默认开启模型发现；内置 `list_agents` 和 `chat_with_agent` Agent 协作工具；Matrix 频道重写，支持端到端加密（E2EE）、提及处理和消息历史；飞书引用消息处理；钉钉扫码认证；扩展 Shell 命令安全守卫规则；RESTful API 教程文档。
-- [v1.1.1] 优化：钉钉频道迁移至阿里云官方 SDK；多模态探测统一化；模型切换时保留媒体记忆；浏览器默认启动策略改为托管 CDP；模型管理重设计；Agent 配置标签页化；技能选择优化。
-- [v1.1.1] 修复：QQ 频道 `stop()` 不再阻塞 8 秒；Windows 本地模型下载失败；vLLM `tool_choice` 兼容。
-- [v1.1.1] 贡献者：感谢新贡献者：@maplefeng-a、@lhpqaq、@jilin6627-spec。
+  - **[v1.1.8] 新增**：官方插件资源（网站下载 + 控制台一键安装）；QwenPaw Pet 桌面宠物；CloudPaw 阿里云部署插件；`/make-skill` 命令；自定义 HTTP Headers 与鉴权模式；支持模型独立配置上下文；收件箱批量操作；聊天历史抽屉固定。
+  - **[v1.1.8] 安全**：备份信任控制；Skill 与 AgentMd 路径穿越防护；插件 API 认证。
+  - **[v1.1.8] 修复**：企业微信/微信/QQ 频道稳定性；按模型限速；SSE 连接泄漏。
+  - **[v1.1.8] 感谢新贡献者**：@Morxi。
 
-[2026-04-12] **CoPaw 正式更名为 QwenPaw**：这是一次品牌名称焕新，也是我们迈向下一阶段开源的重要一步。
+- [2026-05-14] 我们发布了 **v1.1.7**！完整更新说明见 [v1.1.7 发布说明](https://qwenpaw.agentscope.io/release-notes)。
+
+- [2026-05-09] 我们发布了 **v1.1.6**！完整更新说明见 [v1.1.6 发布说明](https://qwenpaw.agentscope.io/release-notes)。
+
+- [2026-04-29] 我们发布了 **v1.1.5**！完整更新说明见 [v1.1.5 发布说明](https://qwenpaw.agentscope.io/release-notes)。
+
+- [2026-04-12] **CoPaw 正式更名为 QwenPaw**：这是一次品牌名称焕新，也是我们迈向下一阶段开源的重要一步。
 
 新的名字，更好地体现了我们正在构建的开源生态，以及我们持续推进的整体开源方向：
 
@@ -120,7 +128,7 @@ qwenpaw init --defaults
 qwenpaw app
 ```
 
-然后在浏览器中打开控制台：**http://127.0.0.1:8088/**，配置模型后即可开始对话。
+然后在浏览器中打开控制台：**http://127.0.0.1:8088/** ，配置模型后即可开始对话。
 若要在钉钉、飞书、微信等 app 内对话，请参考 [频道配置](https://qwenpaw.agentscope.io/docs/channels) 文档。
 
 ![Console](https://img.alicdn.com/imgextra/i1/O1CN01ikrU3k1TRdNESHtzV_!!6000000002379-2-tps-3822-2070.png)
@@ -135,18 +143,6 @@ qwenpaw app
 
 ```bash
 curl -fsSL https://qwenpaw.agentscope.io/install.sh | bash
-```
-
-如需安装 Ollama 支持：
-
-```bash
-curl -fsSL https://qwenpaw.agentscope.io/install.sh | bash -s -- --extras ollama
-```
-
-如需安装多个扩展（例如 Ollama + local）：
-
-```bash
-curl -fsSL https://qwenpaw.agentscope.io/install.sh | bash -s -- --extras ollama,local
 ```
 
 **Windows (CMD):**
@@ -245,12 +241,13 @@ docker pull agentscope/qwenpaw:latest
 docker run -p 127.0.0.1:8088:8088 \
   -v qwenpaw-data:/app/working \
   -v qwenpaw-secrets:/app/working.secret \
+  -v qwenpaw-backups:/app/working.backups \
   agentscope/qwenpaw:latest
 ```
 
 国内用户也可选用阿里云容器镜像服务 (ACR)：`agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/qwenpaw`（tag 相同）。
 
-然后在浏览器中打开控制台：**http://127.0.0.1:8088/**。配置、记忆与 Skills 保存在 `qwenpaw-data` 卷中；模型配置与 API Key 保存在 `qwenpaw-secrets` 卷中。如需传入 API Key（如 `DASHSCOPE_API_KEY`），在 `docker run` 时添加 `-e VAR=value` 或 `--env-file .env`。
+然后在浏览器中打开控制台：**http://127.0.0.1:8088/** 。配置、记忆与 Skills 保存在 `qwenpaw-data` 卷中；模型配置与 API Key 保存在 `qwenpaw-secrets` 卷中；备份归档保存在 `qwenpaw-backups` 卷中。如需传入 API Key（如 `DASHSCOPE_API_KEY`），在 `docker run` 时添加 `-e VAR=value` 或 `--env-file .env`。
 
 > **从容器内连接宿主机上的 Ollama 或其他模型服务**
 >
@@ -262,6 +259,7 @@ docker run -p 127.0.0.1:8088:8088 \
 >   --add-host=host.docker.internal:host-gateway \
 >   -v qwenpaw-data:/app/working \
 >   -v qwenpaw-secrets:/app/working.secret \
+>   -v qwenpaw-backups:/app/working.backups \
 >   agentscope/qwenpaw:latest
 > ```
 > 然后在 QwenPaw **设置 → 模型** 中，将 Base URL 改为 `http://host.docker.internal:<端口>` — 例如 Ollama 填 `http://host.docker.internal:11434`，LM Studio 填 `http://host.docker.internal:1234/v1`。
@@ -271,11 +269,10 @@ docker run -p 127.0.0.1:8088:8088 \
 > docker run --network=host \
 >   -v qwenpaw-data:/app/working \
 >   -v qwenpaw-secrets:/app/working.secret \
+>   -v qwenpaw-backups:/app/working.backups \
 >   agentscope/qwenpaw:latest
 > ```
 > 无需端口映射（`-p`），容器直接共享宿主机网络。注意这会将容器的所有端口暴露在宿主机上，可能与已占用的端口产生冲突。
->
-> **提示：** 如果你只挂载了 `/app/working` 而没有单独挂载 `/app/working.secret`，入口脚本会自动将 secrets 重定向到 `/app/working/.secret`，使其也保存在同一个 volume 中。
 
 镜像从零构建。若需自行构建镜像，请参阅 [scripts/README.md](scripts/README.md#build-docker-image) 中的「Build Docker image」小节，构建后推送到你的镜像仓库。
 
@@ -353,12 +350,13 @@ docker pull agentscope/qwenpaw:latest
 docker run -p 127.0.0.1:8088:8088 \
   -v qwenpaw-data:/app/working \
   -v qwenpaw-secrets:/app/working.secret \
+  -v qwenpaw-backups:/app/working.backups \
   agentscope/qwenpaw:latest
 ```
 
 国内用户也可选用阿里云容器镜像服务 (ACR)：`agentscope-registry.ap-southeast-1.cr.aliyuncs.com/agentscope/qwenpaw`（tag 相同）。
 
-然后在浏览器中打开控制台：**http://127.0.0.1:8088/**。配置、记忆与 Skills 保存在 `qwenpaw-data` 卷中；模型配置与 API Key 保存在 `qwenpaw-secrets` 卷中。如需传入 API Key（如 `DASHSCOPE_API_KEY`），在 `docker run` 时添加 `-e VAR=value` 或 `--env-file .env`。
+然后在浏览器中打开控制台：**http://127.0.0.1:8088/** 。配置、记忆与 Skills 保存在 `qwenpaw-data` 卷中；模型配置与 API Key 保存在 `qwenpaw-secrets` 卷中；备份归档保存在 `qwenpaw-backups` 卷中。如需传入 API Key（如 `DASHSCOPE_API_KEY`），在 `docker run` 时添加 `-e VAR=value` 或 `--env-file .env`。
 
 > **从容器内连接宿主机上的 Ollama 或其他模型服务**
 >
@@ -370,6 +368,7 @@ docker run -p 127.0.0.1:8088:8088 \
 >   --add-host=host.docker.internal:host-gateway \
 >   -v qwenpaw-data:/app/working \
 >   -v qwenpaw-secrets:/app/working.secret \
+>   -v qwenpaw-backups:/app/working.backups \
 >   agentscope/qwenpaw:latest
 > ```
 > 然后在 QwenPaw **设置 → 模型** 中，将 Base URL 改为 `http://host.docker.internal:<端口>` — 例如 Ollama 填 `http://host.docker.internal:11434`，LM Studio 填 `http://host.docker.internal:1234/v1`。
@@ -379,6 +378,7 @@ docker run -p 127.0.0.1:8088:8088 \
 > docker run --network=host \
 >   -v qwenpaw-data:/app/working \
 >   -v qwenpaw-secrets:/app/working.secret \
+>   -v qwenpaw-backups:/app/working.backups \
 >   agentscope/qwenpaw:latest
 > ```
 > 无需端口映射（`-p`），容器直接共享宿主机网络。注意这会将容器的所有端口暴露在宿主机上，可能与已占用的端口产生冲突。
@@ -434,8 +434,10 @@ QwenPaw 可在本机完全本地运行大模型，无需 API Key 或云端服务
 | [模型](https://qwenpaw.agentscope.io/docs/models)           | 配置云/本地/自定义提供商             |
 | [频道配置](https://qwenpaw.agentscope.io/docs/channels)     | 钉钉、飞书、微信、Discord、Telegram 等 |
 | [Skills](https://qwenpaw.agentscope.io/docs/skills)         | 扩展与自定义能力                     |
+| [插件系统](https://qwenpaw.agentscope.io/docs/plugins)       | 插件系统                             |
 | [MCP和工具](https://qwenpaw.agentscope.io/docs/mcp)         | 管理 MCP 客户端和工具                |
 | [记忆](https://qwenpaw.agentscope.io/docs/memory)           | 长期记忆机制                         |
+| [记忆进化与主动交互](https://qwenpaw.agentscope.io/docs/memory-evolving-and-proactive) | 智能体记忆进化与主动交互               |
 | [上下文](https://qwenpaw.agentscope.io/docs/context)        | 上下文管理机制                       |
 | [魔法命令](https://qwenpaw.agentscope.io/docs/commands)     | 控制对话状态，无需等待 AI 理解       |
 | [安全](https://qwenpaw.agentscope.io/docs/security)         | 工具防护、文件防护、技能安全扫描     |
@@ -481,21 +483,28 @@ QwenPaw 内置多层安全防护机制，保障你的数据与系统安全：
 
 ## 路线图
 
-| 方向                   | 事项                                                                                                        | 状态     |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------- | -------- |
-| **横向拓展**           | 更多频道、模型、技能、MCP 等 — **欢迎社区贡献**                                                             | 征集中   |
-| **已有功能扩展与完善** | 展示优化、下载提示、Windows 路径兼容等 — **欢迎社区贡献**                                                   | 征集中   |
-| **控制台 Web UI**      | 在控制台中透出更多信息与配置                                                                                | 进行中   |
-| **多智能体**           | Agentic Ralph Loop                                                                                          | 进行中   |
-| **多模态**             | 语音/视频通话与实时交互                                                                                     | 进行中   |
-| **大小模型协同**       | 多模型路由，不同任务使用不同模型                                                                            | 进行中   |
-| **记忆系统**           | 经验沉淀与技能提炼                                                                                          | 进行中   |
-|                        | 记忆机制切换                                                                                                | 进行中   |
-|                        | 多模态记忆融合                                                                                              | 计划中   |
-|                        | 场景感知主动推送                                                                                            | 计划中   |
-| **沙箱**               | 与 AgentScope Runtime 沙箱深度集成                                                                          | 进行中   |
-| **云原生**             | 与 AgentScope Runtime 深度集成；利用云端算力、存储、工具与技能                                              | 进行中   |
-| **技能生态**           | 丰富 [AgentScope Skills](https://github.com/agentscope-ai/agentscope-skills) 仓库，提升优质技能的发现与使用 | 计划中   |
+| 方向                     | 事项                                                                                      | 状态   |
+| ------------------------ | ----------------------------------------------------------------------------------------- | ------ |
+| **横向拓展**             | 更多频道、模型、技能、MCP 等 — **欢迎社区贡献**                                           | 征集中 |
+| **已有功能扩展与完善**   | 展示优化、下载提示、Windows 路径兼容等 — **欢迎社区贡献**                                 | 征集中 |
+| **客户端体验**           | 安装、更新、打包优化                                                                      | 进行中 |
+| **模型**                 | 端云模型智能切换                                                                          | 进行中 |
+|                          | OAuth                                                                                     | 计划中 |
+|                          | Response API                                                                              | 计划中 |
+| **主动性**               | 定时任务与心跳升级                                                                        | 进行中 |
+|                          | 主动式简报、定制推送                                                                      | 进行中 |
+|                          | 洞察系统：对话与交互挖掘需求                                                              | 计划中 |
+| **工作区**               | 结合 Sandbox 的文件权限管控                                                               | 进行中 |
+|                          | 子目录划分（配置、生产文件等）                                                            | 计划中 |
+| **Coding 能力**          | LSP、专用 Prompt、工作区版本控制、执行环境等配套 infra                                    | 计划中 |
+|                          | 轻量原生接口                                                                              | 计划中 |
+|                          | 工具自进化                                                                                | 计划中 |
+|                          | 兼容 Claude Code 等既有 Agent                                                             | 计划中 |
+| **多智能体**             | 群聊                                                                                      | 计划中 |
+|                          | Subagent                                                                                  | 计划中 |
+|                          | HiClaw 企业级能力                                                                         | 计划中 |
+| **上下文管理**           | 上下文智能压缩                                                                            | 进行中 |
+|                          | 用户可选压缩（细粒度控制）                                                                | 计划中 |
 
 _状态说明：**进行中** — 正在积极开发；**计划中** — 已排队或设计中，也欢迎贡献；**征集中** — 我们强烈鼓励社区参与。_
 

@@ -20,10 +20,19 @@ from .send_file import send_file_to_user
 from .browser_control import browser_use
 from .desktop_screenshot import desktop_screenshot
 from .view_media import view_image, view_video
-from .memory_search import create_memory_search_tool
 from .get_current_time import get_current_time, set_user_timezone
 from .get_token_usage import get_token_usage
-from .agent_management import list_agents, chat_with_agent
+from .agent_management import (
+    list_agents,
+    chat_with_agent,
+    submit_to_agent,
+    check_agent_task,
+)
+from .delegate_external_agent import delegate_external_agent
+
+# Registered via react_agent's hardcoded tool_functions; kept out of
+# __all__ so it's always enabled, not gated on agent config.
+from .make_skill_tools import materialize_skill  # noqa: F401
 
 __all__ = [
     "execute_python_code",
@@ -41,10 +50,12 @@ __all__ = [
     "view_image",
     "view_video",
     "browser_use",
-    "create_memory_search_tool",
     "get_current_time",
     "set_user_timezone",
     "get_token_usage",
+    "delegate_external_agent",
     "list_agents",
     "chat_with_agent",
+    "submit_to_agent",
+    "check_agent_task",
 ]

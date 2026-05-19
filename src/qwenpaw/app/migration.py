@@ -340,17 +340,35 @@ def _do_migrate_legacy_skills() -> bool:
     """Internal implementation of legacy skills migration."""
     from datetime import datetime, timezone
 
-    from ..agents.skills_manager import (
-        _build_signature,
-        _copy_skill_dir,
-        _default_workspace_manifest,
-        _mutate_json,
-        ensure_skill_pool_initialized,
+    from ..agents.skill_system import ensure_skill_pool_initialized
+    from ..agents.skill_system.registry import reconcile_workspace_manifest
+    from ..agents.skill_system.store import (
+        copy_skill_dir,
+        default_workspace_manifest,
         get_pool_skill_manifest_path,
         get_workspace_skill_manifest_path,
         get_workspace_skills_dir,
-        reconcile_workspace_manifest,
+        mutate_json,
     )
+
+    import hashlib
+
+    _ignored = {
+        "__pycache__",
+        "__MACOSX",
+        ".DS_Store",
+        "Thumbs.db",
+        "desktop.ini",
+    }
+
+    def _build_signature(skill_dir: Path) -> str:
+        digest = hashlib.sha256()
+        for path in sorted(p for p in skill_dir.rglob("*") if p.is_file()):
+            if _ignored & set(path.relative_to(skill_dir).parts):
+                continue
+            digest.update(str(path.relative_to(skill_dir)).encode("utf-8"))
+            digest.update(path.read_bytes())
+        return digest.hexdigest()
 
     # --- Phase 0: Check if migration already completed ---
     # If skill pool manifest exists, migration has been done
@@ -402,7 +420,7 @@ def _do_migrate_legacy_skills() -> bool:
                 target_dir,
             )
             return False
-        _copy_skill_dir(source_dir, target_dir)
+        copy_skill_dir(source_dir, target_dir)
         return True
 
     # --- Phase 1: Initialize pool ---
@@ -595,9 +613,9 @@ def _do_migrate_legacy_skills() -> bool:
                     changed += 1
             return changed
 
-        _mutate_json(
+        mutate_json(
             get_workspace_skill_manifest_path(workspace_dir),
-            _default_workspace_manifest(),
+            default_workspace_manifest(),
             _update,
         )
 

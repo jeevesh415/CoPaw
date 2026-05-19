@@ -90,13 +90,14 @@
 
 查看和管理对话历史的命令。
 
-| 命令            | 返回内容                 |
-| --------------- | ------------------------ |
-| `/history`      | 📋 消息列表 + Token 统计 |
-| `/message`      | 📄 指定消息详情          |
-| `/compact_str`  | 📝 压缩摘要内容          |
-| `/dump_history` | 📁 历史导出文件路径      |
-| `/load_history` | ✅ 历史加载结果          |
+| 命令                | 返回内容                 |
+| ------------------- | ------------------------ |
+| `/history`          | 📋 消息列表 + Token 统计 |
+| `/message`          | 📄 指定消息详情          |
+| `/compact_str`      | 📝 压缩摘要内容          |
+| `/summarize_status` | 📊 摘要任务状态          |
+| `/dump_history`     | 📁 历史导出文件路径      |
+| `/load_history`     | ✅ 历史加载结果          |
 
 ---
 
@@ -203,6 +204,33 @@
 - No summary has been generated yet
 - Use /compact or wait for auto-compaction
 ```
+
+---
+
+### /summarize_status - 查看摘要任务状态
+
+显示所有后台摘要任务的运行状态，包括任务 ID、开始时间和执行结果。
+
+```
+/summarize_status
+```
+
+**返回示例：**
+
+```
+**Summary Task Status**
+
+- **task-001**
+  - Start: 2024-01-15 10:30:00
+  - Status: completed
+  - Result: 用户请求帮助构建用户认证系统...
+- **task-002**
+  - Start: 2024-01-15 10:35:00
+  - Status: failed
+  - Error: Summary generation timeout
+```
+
+> 💡 使用 `/compact` 或 `/new` 时会自动在后台启动摘要任务，可通过此命令查看其执行情况。
 
 ---
 
@@ -513,7 +541,12 @@ Use `/model openai:gpt-4o` to switch to this model.
 | `/daemon reload-config`             | 重新读取并校验配置文件                                                       | ✅   | ✅   |
 | `/daemon version`                   | 版本号、工作目录与日志路径                                                   | ✅   | ✅   |
 | `/daemon logs` 或 `/daemon logs 50` | 查看最近 N 行日志（默认 100 行，最大 2000 行，来自工作目录下 `qwenpaw.log`） | ✅   | ✅   |
-| `/daemon approve`                   | 批准待审的工具调用（工具审批场景）                                           | ✅   | ❌   |
+| `/approval approve [request_id]`    | 批准待审的工具调用（无 ID 则批准队首）                                       | ✅   | ❌   |
+| `/approval deny [request_id]`       | 拒绝待审的工具调用，可附理由                                                 | ✅   | ❌   |
+| `/approval list`                    | 列出所有待审批请求                                                           | ✅   | ❌   |
+| `/approval cancel <request_id>`     | 取消指定审批请求                                                             | ✅   | ❌   |
+| `/approve`                          | `/approval approve` 的快捷方式                                               | ✅   | ❌   |
+| `/deny`                             | `/approval deny` 的快捷方式                                                  | ✅   | ❌   |
 
 ---
 
@@ -602,23 +635,36 @@ qwenpaw daemon logs -n 200   # 在终端指定 200 行
 
 ---
 
-### `/daemon approve` - 批准工具调用
+### `/approval` - 工具执行审批命令
 
-快速批准待审的工具调用。当工具调用需要人工审批时（tool-guard 场景），使用此命令批准执行。
+管理工具审批请求。当 `approval_level` 设为 `STRICT` 或 `SMART` 时，存在 CRITICAL 或 HIGH 级别发现的工具调用会进入待审批队列，使用这些命令进行批准、拒绝、列表查看或取消操作。
 
 **用法：**
 
 ```
-/daemon approve            # 在对话中
+/approval approve [request_id]           # 批准指定请求或队首请求
+/approval deny [request_id] [reason]     # 拒绝并附理由
+/approval list                           # 列出当前会话的待审批项
+/approval list --all                     # 列出所有会话的待审批项
+/approval cancel <request_id>            # 取消指定请求
 ```
 
-> 💡 **提示**：此命令仅在对话中有效。当 Agent 提示需要批准工具调用时，发送此命令即可快速批准。
+**快捷方式：**
+
+```
+/approve                                 # 等同于 /approval approve
+/approve <request_id>                    # 等同于 /approval approve <request_id>
+/deny                                    # 等同于 /approval deny
+/deny <request_id> <reason>              # 等同于 /approval deny <request_id> <reason>
+```
+
+> `/approval list` 显示当前会话（含子会话）的待审批项。使用 `--all` 或 `-a` 查看该 Agent 所有会话的待审批项。
 
 ---
 
 ### 终端使用
 
-所有 daemon 命令都支持在终端中使用（除 `/stop` 和 `/daemon approve` 仅在对话中有效）：
+所有 daemon 命令都支持在终端中使用（除 `/stop` 和 `/approval` 仅在对话中有效）：
 
 ```bash
 qwenpaw daemon status
@@ -853,5 +899,86 @@ Phase 2 执行过程中，可以随时发送消息与 master agent 交互：
 | ---------------- | ------------------ | ------------------- | --------------- |
 | **普通对话**     | 简单任务、快速修改 | 单 agent 直接执行   | 所有工具可用    |
 | **Mission Mode** | 复杂、长期任务     | Master 调度 workers | Master 限制工具 |
+
+---
+
+## Plan Mode - 计划模式
+
+计划模式提供结构化的任务规划和分步执行能力。完整文档请参见 [计划模式](./plan)。
+
+| 命令               | 说明                                        | 对话 |
+| ------------------ | ------------------------------------------- | ---- |
+| `/plan`            | 显示计划模式状态（启用/禁用）及当前计划信息 | ✅   |
+| `/plan <任务描述>` | 创建新的结构化计划并开始分步执行            | ✅   |
+
+---
+
+## Proactive Mode - 主动提醒模式
+
+Proactive Mode（主动提醒模式）是一个智能化的功能，允许 AI 代理在检测到用户长时间未活动后，主动分析用户当前的会话上下文和屏幕活动，并提供相关的帮助和信息。
+
+### 核心特性
+
+- 🤖 **智能检测**：监控用户会话活动状态，当检测到设定时间内的无活动时触发
+- 🧠 **上下文分析**：分析用户的对话历史和当前屏幕内容，识别潜在需求
+- 🔍 **目标提取**：从对话历史中提取用户可能关注的高频或近期主题
+- 💬 **主动响应**：基于分析结果，自动生成友好且相关的主动帮助信息
+
+### 重要提示
+
+**启用此模式前请务必知悉以下风险：**
+
+- **工具防护绕过**：在此模式下，Agent会绕过标准的工具防护机制，Agent 拥有更高的系统权限和执行自由度
+- **隐私与环境访问**：Agent会读取历史会话记忆以理解上下文，并可能进行截屏以获取当前的运行环境信息。请确保在可信环境中使用，并注意敏感信息的保护
+- 本模式默认不启用，仅在用户主动开启时才生效，且可在开启后关闭
+
+### 基本用法
+
+#### 启用主动提醒模式
+
+```bash
+/proactive
+/proactive on
+/proactive <分钟数>
+```
+
+**示例：**
+
+```bash
+/proactive      # 默认30分钟后如果没有活动则触发主动提醒
+/proactive on   # 同上，默认30分钟
+/proactive 60   # 60分钟后触发主动提醒
+```
+
+#### 停用主动提醒模式
+
+```bash
+/proactive off
+```
+
+### 工作原理
+
+1. **监控阶段**：持续监控用户活动，记录最后活动时间戳
+2. **分析阶段**：当检测到超过设定的空闲时间后，分析最近的对话历史
+3. **任务提取**：识别用户可能关心的主题和目标
+4. **查询执行**：使用浏览器、文件读取、命令执行等工具获取相关信息
+5. **响应生成**：生成友好且相关的主动帮助信息
+
+#### 上下文感知
+
+- 仅关注用户发起的消息，忽略系统消息
+- 避免重复发送相同主题的主动提醒
+- 优先处理高频和近期提到的主题
+
+### 注意事项
+
+1. **资源消耗**：启用后会定期分析上下文，可能增加计算资源使用
+2. **干扰控制**：如果用户在收到主动消息后未回应，则不会连续发送新的主动消息
+3. **模型依赖**：功能效果取决于所使用的AI模型能力，支持多媒体的模型能更好利用屏幕分析功能
+
+### 典型应用场景
+
+- 研究过程中的新信息获取
+- 学习过程中的补充知识提供
 
 ---

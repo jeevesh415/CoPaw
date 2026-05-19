@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
+import os
+import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Coroutine
 
 import frontmatter as fm
 from agentscope.message import Msg, TextBlock
-from agentscope.pipeline import stream_printing_messages
 from agentscope_runtime.engine.runner import Runner
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 from agentscope_runtime.engine.schemas.exception import (
@@ -39,36 +39,71 @@ from ...agents.utils.file_handling import (
     read_text_file_with_encoding_fallback,
 )
 from ...config.config import load_agent_config
-from ...constant import (
-    TOOL_GUARD_APPROVAL_TIMEOUT_SECONDS,
-    WORKING_DIR,
-)
-from ...security.tool_guard.approval import ApprovalDecision
-from ...security.tool_guard.models import TOOL_GUARD_DENIED_MARK
+from ...constant import WORKING_DIR
 
 if TYPE_CHECKING:
     from ...agents.memory import BaseMemoryManager
+    from ...agents.context import BaseContextManager
 
 logger = logging.getLogger(__name__)
 
-_APPROVE_EXACT = frozenset(
-    {
-        "approve",
-        "/approve",
-        "/daemon approve",
-    },
-)
+
+_PRINT_END_SIGNAL = "[END]"
 
 
-def _is_approval(text: str) -> bool:
-    """Return True only when *text* is exactly ``approve``,
-    ``/approve``, or ``/daemon approve`` (case-insensitive).
+async def _cancel_streaming_agent_task(task: asyncio.Task) -> None:
+    if task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        logger.debug(
+            "Streaming agent task finished with error during cancellation",
+            exc_info=True,
+        )
 
-    Leading/trailing whitespace and blank lines are stripped before
-    comparison.  Everything else is treated as denial.
+
+async def _stream_printing_messages_interruptible(
+    *,
+    agents: list[Any],
+    coroutine_task: Coroutine[Any, Any, Msg],
+) -> AsyncGenerator[tuple[Msg, bool], None]:
+    """Like agentscope.stream_printing_messages, but cancel the agent task
+    promptly when the outer stream is stopped or closed.
     """
-    normalized = " ".join(text.split()).lower()
-    return normalized in _APPROVE_EXACT
+
+    queue: asyncio.Queue = asyncio.Queue()
+    for agent in agents:
+        agent.set_msg_queue_enabled(True, queue)
+
+    task = asyncio.create_task(coroutine_task)
+    if task.done():
+        await queue.put(_PRINT_END_SIGNAL)
+    else:
+        task.add_done_callback(lambda _: queue.put_nowait(_PRINT_END_SIGNAL))
+
+    try:
+        while True:
+            printing_msg = await queue.get()
+            if (
+                isinstance(printing_msg, str)
+                and printing_msg == _PRINT_END_SIGNAL
+            ):
+                break
+            msg, last, _ = printing_msg
+            yield msg, last
+
+        exception = task.exception()
+        if exception is not None:
+            raise exception from None
+    except asyncio.CancelledError:
+        await _cancel_streaming_agent_task(task)
+        raise
+    finally:
+        await _cancel_streaming_agent_task(task)
 
 
 class AgentRunner(Runner):
@@ -88,7 +123,24 @@ class AgentRunner(Runner):
         self._mcp_manager = None  # MCP client manager for hot-reload
         self._workspace: Any = None  # Workspace instance for control commands
         self.memory_manager: BaseMemoryManager | None = None
+        self.context_manager: BaseContextManager | None = None
         self._task_tracker = task_tracker  # Task tracker for background tasks
+        self._agent_name: str | None = None
+
+    @property
+    def agent_name(self) -> str:
+        """Agent display name from config, cached after first access."""
+        if self._agent_name is None:
+            try:
+                cfg = load_agent_config(self.agent_id)
+                self._agent_name = cfg.name if cfg and cfg.name else "QwenPaw"
+            except Exception:
+                self._agent_name = "QwenPaw"
+        return self._agent_name
+
+    def invalidate_agent_name_cache(self) -> None:
+        """Clear cached agent_name so next access re-reads config."""
+        self._agent_name = None
 
     def set_chat_manager(self, chat_manager):
         """Set chat manager for auto-registration.
@@ -148,8 +200,8 @@ class AgentRunner(Runner):
         user_input = parts[1] if len(parts) > 1 else ""
         return (name, user_input) if name else None
 
-    @staticmethod
     def _maybe_inject_skill(
+        self,
         query: str | None,
         msgs: list,
         skills: dict,
@@ -197,7 +249,7 @@ class AgentRunner(Runner):
             desc = post.get("description") or "No description."
             logger.info("Skill info: %s", name)
             return Msg(
-                name="Friday",
+                name=self.agent_name,
                 role="assistant",
                 content=[
                     TextBlock(
@@ -249,105 +301,55 @@ class AgentRunner(Runner):
         elif isinstance(content, str):
             last.content = new_text
 
-    _APPROVAL_TIMEOUT_SECONDS = TOOL_GUARD_APPROVAL_TIMEOUT_SECONDS
-
-    async def _resolve_pending_approval(
+    async def _persist_exchange_to_session(
         self,
         session_id: str,
-        query: str | None,
-    ) -> tuple[Msg | None, bool, dict[str, Any] | None]:
-        """Check for a pending tool-guard approval for *session_id*.
+        user_id: str,
+        channel: str,
+        msgs: list,
+        response_msg: "Msg",
+    ) -> None:
+        """Persist a user-message + response to session memory.
 
-        Returns ``(response_msg, was_consumed, approved_tool_call)``:
-
-        - ``(None, False, None)`` — no pending approval, continue normally.
-        - ``(Msg, True, None)``   — denied; yield the Msg and stop.
-        - ``(None, True, dict)``  — approved with stored tool call.
-
-        Approvals are resolved FIFO per session (oldest pending first).
+        Used by early-exit paths (/mission info, /skill info) that bypass
+        the full agent pipeline and would otherwise leave session memory
+        unsaved — causing the response to vanish when the frontend
+        reloads the session from the backend.
         """
-        if not session_id:
-            return None, False, None
-
-        from ..approvals import get_approval_service
-
-        svc = get_approval_service()
-        pending = await svc.get_pending_by_session(session_id)
-        if pending is None:
-            return None, False, None
-
-        elapsed = time.time() - pending.created_at
-        if elapsed > self._APPROVAL_TIMEOUT_SECONDS:
-            await svc.resolve_request(
-                pending.request_id,
-                ApprovalDecision.TIMEOUT,
+        if not session_id or not user_id:
+            return
+        try:
+            context_manager = self.context_manager
+            if context_manager is None:
+                return
+            memory = context_manager.get_agent_context()
+            if memory is None:
+                return
+            state = await self.session.get_session_state_dict(
+                session_id,
+                user_id,
+                channel,
+                allow_not_exist=True,
             )
-            return (
-                Msg(
-                    name="Friday",
-                    role="assistant",
-                    content=[
-                        TextBlock(
-                            type="text",
-                            text=(
-                                f"⏰ Tool `{pending.tool_name}` approval "
-                                f"timed out ({int(elapsed)}s) — denied.\n"
-                                f"工具 `{pending.tool_name}` 审批超时"
-                                f"（{int(elapsed)}s），已拒绝执行。"
-                            ),
-                        ),
-                    ],
-                ),
-                True,
-                None,
+            memory_state = (state or {}).get("agent", {}).get("memory", {})
+            memory.load_state_dict(memory_state, strict=False)
+            if msgs:
+                await memory.add(msgs[-1])
+            await memory.add(response_msg)
+            await self.session.update_session_state(
+                session_id=session_id,
+                key="agent.memory",
+                value=memory.state_dict(),
+                user_id=user_id,
+                channel=channel,
             )
-
-        normalized = (query or "").strip().lower()
-        if _is_approval(normalized):
-            resolved = await svc.resolve_request(
-                pending.request_id,
-                ApprovalDecision.APPROVED,
+            preview = session_id[:12] if len(session_id) >= 12 else session_id
+            logger.debug("Persisted exchange to session %s", preview)
+        except Exception:
+            logger.debug(
+                "Failed to persist exchange to session",
+                exc_info=True,
             )
-            approved_tool_call: dict[str, Any] | None = None
-            record = resolved or pending
-            if isinstance(record.extra, dict):
-                candidate = record.extra.get("tool_call")
-                if isinstance(candidate, dict):
-                    approved_tool_call = dict(candidate)
-                    siblings = record.extra.get("sibling_tool_calls")
-                    if isinstance(siblings, list):
-                        approved_tool_call["_sibling_tool_calls"] = siblings
-                    remaining = record.extra.get("remaining_queue")
-                    if isinstance(remaining, list):
-                        approved_tool_call["_remaining_queue"] = remaining
-                    thinking_blocks = record.extra.get("thinking_blocks")
-                    if isinstance(thinking_blocks, list):
-                        approved_tool_call[
-                            "_thinking_blocks"
-                        ] = thinking_blocks
-            return None, True, approved_tool_call
-
-        await svc.resolve_request(
-            pending.request_id,
-            ApprovalDecision.DENIED,
-        )
-        return (
-            Msg(
-                name="Friday",
-                role="assistant",
-                content=[
-                    TextBlock(
-                        type="text",
-                        text=(
-                            f"❌ Tool `{pending.tool_name}` denied.\n"
-                            f"工具 `{pending.tool_name}` 已拒绝执行。"
-                        ),
-                    ),
-                ],
-            ),
-            True,
-            None,
-        )
 
     async def query_handler(
         self,
@@ -365,22 +367,9 @@ class AgentRunner(Runner):
         query = _get_last_user_text(msgs)
         session_id = getattr(request, "session_id", "") or ""
 
-        (
-            approval_response,
-            approval_consumed,
-            approved_tool_call,
-        ) = await self._resolve_pending_approval(session_id, query)
-        if approval_response is not None:
-            yield approval_response, True
-            user_id = getattr(request, "user_id", "") or ""
-            await self._cleanup_denied_session_memory(
-                session_id,
-                user_id,
-                denial_response=approval_response,
-            )
-            return
-
-        if not approval_consumed and query and _is_command(query):
+        # Check if query is a command (including /approval)
+        logger.debug(f"Query: {query!r}, is_command: {_is_command(query)}")
+        if query and _is_command(query):
             logger.info("Command path: %s", query.strip()[:50])
             async for msg, last in run_command_path(request, msgs, self):
                 yield msg, last
@@ -395,6 +384,7 @@ class AgentRunner(Runner):
         from ..agent_context import (
             set_current_agent_id,
             set_current_session_id,
+            set_current_root_session_id,
         )
 
         set_current_agent_id(self.agent_id)
@@ -425,24 +415,40 @@ class AgentRunner(Runner):
                 ),
             )
 
+            # Optional sender display name from channel_meta.user_name.
+            channel_meta = getattr(request, "channel_meta", None)
+            if not isinstance(channel_meta, dict):
+                channel_meta = {}
+            user_name = channel_meta.get("user_name")
+
+            # Load agent-specific configuration
+            agent_config = load_agent_config(self.agent_id)
+
+            _configured_shell = (
+                agent_config.running.shell_command_executable or None
+            )
+            _default_shell = (
+                _configured_shell
+                or os.environ.get("SHELL")
+                or ("cmd.exe" if sys.platform == "win32" else "/bin/sh")
+            )
             env_context = build_env_context(
                 session_id=session_id,
                 user_id=user_id,
+                user_name=user_name,
                 channel=channel,
                 working_dir=(
                     str(self.workspace_dir)
                     if self.workspace_dir
                     else str(WORKING_DIR)
                 ),
+                default_shell=_default_shell,
             )
 
             # Get MCP clients from manager (hot-reloadable)
             mcp_clients = []
             if self._mcp_manager is not None:
                 mcp_clients = await self._mcp_manager.get_clients()
-
-            # Load agent-specific configuration
-            agent_config = load_agent_config(self.agent_id)
 
             logger.debug(f"Enabled MCP: {mcp_clients}")
 
@@ -452,23 +458,37 @@ class AgentRunner(Runner):
                 "user_id": user_id,
                 "channel": channel,
                 "agent_id": self.agent_id,
-                **(
-                    {
-                        "forced_tool_call_json": json.dumps(
-                            approved_tool_call,
-                            ensure_ascii=False,
-                        ),
-                    }
-                    if approved_tool_call
-                    else {}
-                ),
+                "root_agent_id": self.agent_id,
             }
+            payload_context = getattr(request, "request_context", None)
+            if isinstance(payload_context, dict):
+                base_request_context.update(payload_context)
 
-            # Merge custom request_context from request
-            # (e.g., _headless_tool_guard)
-            custom_context = getattr(request, "request_context", None)
-            if custom_context and isinstance(custom_context, dict):
-                base_request_context.update(custom_context)
+            # Extract root_session_id from request payload (agent chat)
+            payload_root_session = getattr(request, "root_session_id", "")
+            if payload_root_session and isinstance(payload_root_session, str):
+                base_request_context["root_session_id"] = payload_root_session
+                set_current_root_session_id(payload_root_session)
+                root_preview = (
+                    payload_root_session[:12]
+                    if len(payload_root_session) >= 12
+                    else payload_root_session
+                )
+                logger.debug(
+                    "Runner: using root_session_id from payload: %s",
+                    root_preview,
+                )
+            else:
+                # Current session is the root
+                base_request_context["root_session_id"] = session_id
+                set_current_root_session_id(session_id)
+                session_preview = (
+                    session_id[:12] if len(session_id) >= 12 else session_id
+                )
+                logger.debug(
+                    "Runner: current session is root: %s",
+                    session_preview,
+                )
 
             # Mission Mode: /mission
             _ws = self.workspace_dir or WORKING_DIR
@@ -481,30 +501,163 @@ class AgentRunner(Runner):
                 agent_id=self.agent_id,
                 rewrite_fn=self._rewrite_last_message_text,
                 session_id=session_id,
+                agent_name=self.agent_name,
             )
             if isinstance(mission_result, Msg):
+                await self._persist_exchange_to_session(
+                    session_id,
+                    user_id,
+                    channel,
+                    msgs,
+                    mission_result,
+                )
                 yield mission_result, True
                 return
             if isinstance(mission_result, dict):
                 mission_info = mission_result
 
-            # Mission Mode: bypass tool guard
-            # (workers can't respond to /approve)
-            if mission_info is not None:
-                base_request_context["_headless_tool_guard"] = "false"
-                logger.info(
-                    "Mission Mode: bypassing tool guard for session %s",
-                    session_id,
+            # Active mission: auto-detect follow-up messages
+            # (e.g., user confirms PRD without typing /mission again)
+            if mission_info is None:
+                mission_info = detect_active_mission_phase(
+                    _ws,
+                    session_id=session_id,
                 )
+
+            # Mission Mode: inject context reminder for active mission
+            if mission_info is not None:
+                # Inject context reminder for active mission
+                loop_dir = mission_info.get("loop_dir", "")
+                phase = mission_info.get("mission_phase", 1)
+                if phase == 1:
+                    refresher = (
+                        f"[Mission active — dir: `{loop_dir}`]\n"
+                        f"You are in Mission Phase 1 (PRD review). "
+                        f"The user's message follows.\n"
+                        f"If the user is confirming the PRD, update "
+                        f"`{loop_dir}/loop_config.json` setting "
+                        f"`current_phase` to `execution_confirmed`.\n"
+                        f"If the user requests changes, modify "
+                        f"prd.json.\n---\n"
+                    )
+                elif phase == 2:
+                    refresher = (
+                        f"[Mission active — dir: `{loop_dir}`]\n"
+                        f"You are in Mission Phase 2 (execution). "
+                        f"The user's follow-up message follows.\n"
+                        f"Continue the worker → verifier pipeline. "
+                        f"Check prd.json progress and dispatch workers "
+                        f"for remaining stories.\n---\n"
+                    )
+                else:
+                    refresher = f"[Mission active — dir: `{loop_dir}`]\n---\n"
+                original = query or ""
+                self._rewrite_last_message_text(
+                    msgs,
+                    refresher + original,
+                )
+
+            # --- Plan Mode ------------------------------------------
+            plan_notebook = None
+            plan_enabled = getattr(
+                getattr(agent_config, "plan", None),
+                "enabled",
+                False,
+            )
+            if plan_enabled:
+                try:
+                    from agentscope.plan import (
+                        PlanNotebook,
+                        InMemoryPlanStorage,
+                    )
+                    from ...plan.hints import SimplePlanToHint, set_plan_gate
+
+                    hint_gen = SimplePlanToHint()
+                    plan_notebook = PlanNotebook(
+                        plan_to_hint=hint_gen,
+                        storage=InMemoryPlanStorage(),
+                    )
+                    hint_gen.bind_notebook(plan_notebook)
+
+                    # Detect /plan <description> and set gate
+                    if query and query.strip().lower().startswith("/plan "):
+                        plan_desc = query.strip()[6:].strip()
+                        if plan_desc:
+                            set_plan_gate(plan_notebook, enabled=True)
+                            self._rewrite_last_message_text(
+                                msgs,
+                                plan_desc,
+                            )
+                            logger.info(
+                                "Plan mode: /plan gate set, desc=%s",
+                                plan_desc[:60],
+                            )
+
+                    # Register SSE broadcast hook + state tracking
+                    from ...plan.broadcast import broadcast_plan_update
+                    from ...plan.schemas import plan_to_response
+
+                    def _on_plan_change(  # pylint: disable=protected-access
+                        nb,
+                        plan,
+                    ):
+                        if getattr(nb, "_loading_from_state", False):
+                            nb._qp_had_plan = plan is not None
+                            nb._qp_prev_plan_id = (
+                                plan.id if plan is not None else None
+                            )
+                            return
+
+                        had_plan = getattr(nb, "_qp_had_plan", False)
+                        prev_id = getattr(nb, "_qp_prev_plan_id", None)
+
+                        if plan is not None:
+                            cur_id = plan.id
+                            if not had_plan or cur_id != prev_id:
+                                nb._plan_just_mutated = True
+                            nb._qp_prev_plan_id = cur_id
+                        else:
+                            if had_plan:
+                                nb._plan_recently_finished = True
+                                nb._plan_awaiting_user_confirm = False
+                            nb._qp_prev_plan_id = None
+                        nb._qp_had_plan = plan is not None
+
+                        payload = {
+                            "type": "plan_update",
+                            "plan": (
+                                plan_to_response(plan).model_dump()
+                                if plan is not None
+                                else None
+                            ),
+                        }
+                        broadcast_plan_update(
+                            self.agent_id,
+                            payload,
+                            session_id=session_id,
+                        )
+
+                    plan_notebook.register_plan_change_hook(
+                        "broadcast",
+                        _on_plan_change,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to create PlanNotebook",
+                        exc_info=True,
+                    )
+                    plan_notebook = None
 
             agent = QwenPawAgent(
                 agent_config=agent_config,
                 env_context=env_context,
                 mcp_clients=mcp_clients,
                 memory_manager=self.memory_manager,
+                context_manager=self.context_manager,
                 request_context=base_request_context,
                 workspace_dir=self.workspace_dir,
                 task_tracker=self._task_tracker,
+                plan_notebook=plan_notebook,
             )
             await agent.register_mcp_clients()
             agent.set_console_output_enabled(enabled=False)
@@ -547,47 +700,6 @@ class AgentRunner(Runner):
                     f"session_id={session_id}",
                 )
 
-            # Active mission: auto-route follow-up messages
-            if mission_info is None:
-                mission_info = detect_active_mission_phase(
-                    _ws,
-                    session_id=session_id,
-                )
-                if mission_info is not None:
-                    loop_dir = mission_info["loop_dir"]
-                    phase = mission_info.get("mission_phase", 1)
-
-                    if phase == 1:
-                        refresher = (
-                            f"[Mission active — dir: `{loop_dir}`]\n"
-                            f"You are in Mission Phase 1 (PRD review). "
-                            f"The user's message follows.\n"
-                            f"If the user is confirming the PRD, update "
-                            f"`{loop_dir}/loop_config.json` setting "
-                            f"`current_phase` to `execution_confirmed`.\n"
-                            f"If the user requests changes, modify "
-                            f"prd.json.\n---\n"
-                        )
-                    elif phase == 2:
-                        refresher = (
-                            f"[Mission active — dir: `{loop_dir}`]\n"
-                            f"You are in Mission Phase 2 (execution). "
-                            f"The user's follow-up message follows.\n"
-                            f"Continue the worker → verifier pipeline. "
-                            f"Check prd.json progress and dispatch workers "
-                            f"for remaining stories.\n---\n"
-                        )
-                    else:
-                        refresher = (
-                            f"[Mission active — dir: `{loop_dir}`]\n---\n"
-                        )
-
-                    original = query or ""
-                    self._rewrite_last_message_text(
-                        msgs,
-                        refresher + original,
-                    )
-
             # Skill info (/<name> without input) is display-only
             if mission_info is None:
                 skill_response = self._maybe_inject_skill(
@@ -596,13 +708,57 @@ class AgentRunner(Runner):
                     agent.toolkit.skills,
                 )
                 if skill_response is not None:
+                    await self._persist_exchange_to_session(
+                        session_id,
+                        user_id,
+                        channel,
+                        msgs,
+                        skill_response,
+                    )
                     yield skill_response, True
                     return
 
+            # Ensure session file has a valid plan_notebook dict
+            # to prevent TypeError/KeyError during load_state_dict
+            if plan_notebook is not None:
+                try:
+                    _states = await self.session.get_session_state_dict(
+                        session_id=session_id,
+                        user_id=user_id,
+                        channel=channel,
+                        allow_not_exist=True,
+                    )
+                    _agent_st = _states.get("agent", {})
+                    _nb_val = _agent_st.get("plan_notebook")
+                    if _agent_st and (
+                        "plan_notebook" not in _agent_st
+                        or not isinstance(_nb_val, dict)
+                    ):
+                        await self.session.update_session_state(
+                            session_id=session_id,
+                            key="agent.plan_notebook",
+                            value=plan_notebook.state_dict(),
+                            user_id=user_id,
+                            channel=channel,
+                            create_if_not_exist=False,
+                        )
+                except Exception:
+                    logger.debug(
+                        "Pre-populate plan_notebook skipped",
+                        exc_info=True,
+                    )
+
+            if plan_notebook is not None:
+                setattr(
+                    plan_notebook,
+                    "_loading_from_state",
+                    True,  # pylint: disable=protected-access
+                )
             try:
                 await self.session.load_session_state(
                     session_id=session_id,
                     user_id=user_id,
+                    channel=channel,
                     agent=agent,
                 )
             except KeyError as e:
@@ -611,7 +767,19 @@ class AgentRunner(Runner):
                     "will save fresh state on completion to recover file",
                     e,
                 )
+            finally:
+                if plan_notebook is not None:
+                    setattr(
+                        plan_notebook,
+                        "_loading_from_state",
+                        False,  # pylint: disable=protected-access
+                    )
             session_state_loaded = True
+
+            if plan_notebook is not None:
+                from ...plan.hints import clear_plan_awaiting_user_confirm
+
+                clear_plan_awaiting_user_confirm(plan_notebook)
 
             # Rebuild system prompt so it always reflects the latest
             # AGENTS.md / SOUL.md / PROFILE.md, not the stale one saved
@@ -651,7 +819,7 @@ class AgentRunner(Runner):
                     ):
                         yield msg, last
             else:
-                async for msg, last in stream_printing_messages(
+                async for msg, last in _stream_printing_messages_interruptible(
                     agents=[agent],
                     coroutine_task=agent(msgs),
                 ):
@@ -659,6 +827,29 @@ class AgentRunner(Runner):
 
         except asyncio.CancelledError as exc:
             logger.info(f"query_handler: {session_id} cancelled!")
+
+            # Cancel all pending approvals for this root session
+            root_session_id = base_request_context.get(
+                "root_session_id",
+                session_id,
+            )
+            from ..approvals.service import get_approval_service
+
+            approval_svc = get_approval_service()
+            cancelled_count = (
+                await approval_svc.cancel_all_pending_by_root_session(
+                    root_session_id,
+                )
+            )
+            if cancelled_count > 0:
+                logger.info(
+                    "Auto-denied %d pending approval(s) for root session %s",
+                    cancelled_count,
+                    root_session_id[:8]
+                    if len(root_session_id) >= 8
+                    else root_session_id,
+                )
+
             if agent is not None:
                 await agent.interrupt()
             raise AgentException("Task has been cancelled!") from exc
@@ -703,121 +894,12 @@ class AgentRunner(Runner):
                 await self.session.save_session_state(
                     session_id=session_id,
                     user_id=user_id,
+                    channel=channel,
                     agent=agent,
                 )
 
             if self._chat_manager is not None and chat is not None:
                 await self._chat_manager.touch_chat(chat.id)
-
-    async def _cleanup_denied_session_memory(
-        self,
-        session_id: str,
-        user_id: str,
-        denial_response: "Msg | None" = None,
-    ) -> None:
-        """Clean up session memory after a tool-guard denial.
-
-        In the deny path (no agent is created), this method:
-
-        1. Removes the LLM denial explanation (the assistant message
-           immediately following the last marked entry).
-        2. Strips ``TOOL_GUARD_DENIED_MARK`` from all marks lists so
-           the kept tool-call info becomes normal memory entries.
-        3. Appends *denial_response* (e.g. "❌ Tool denied") to the
-           persisted session memory.
-        """
-        if not hasattr(self, "session") or self.session is None:
-            return
-
-        path = self.session._get_save_path(  # pylint: disable=protected-access
-            session_id,
-            user_id,
-        )
-        if not Path(path).exists():
-            return
-
-        try:
-            with open(
-                path,
-                "r",
-                encoding="utf-8",
-                errors="surrogatepass",
-            ) as f:
-                states = json.load(f)
-
-            agent_state = states.get("agent", {})
-            memory_state = agent_state.get("memory", {})
-            content = memory_state.get("content", [])
-
-            if not content:
-                return
-
-            def _is_marked(entry):
-                return (
-                    isinstance(entry, list)
-                    and len(entry) >= 2
-                    and isinstance(entry[1], list)
-                    and TOOL_GUARD_DENIED_MARK in entry[1]
-                )
-
-            last_marked_idx = -1
-            for i, entry in enumerate(content):
-                if _is_marked(entry):
-                    last_marked_idx = i
-
-            modified = False
-
-            if last_marked_idx >= 0 and last_marked_idx + 1 < len(content):
-                next_entry = content[last_marked_idx + 1]
-                if (
-                    isinstance(next_entry, list)
-                    and len(next_entry) >= 1
-                    and isinstance(next_entry[0], dict)
-                    and next_entry[0].get("role") == "assistant"
-                ):
-                    del content[last_marked_idx + 1]
-                    modified = True
-
-            for entry in content:
-                if _is_marked(entry):
-                    entry[1].remove(TOOL_GUARD_DENIED_MARK)
-                    modified = True
-
-            if denial_response is not None:
-                ts = getattr(denial_response, "timestamp", None)
-                msg_dict = {
-                    "id": getattr(denial_response, "id", ""),
-                    "name": getattr(denial_response, "name", "Friday"),
-                    "role": getattr(denial_response, "role", "assistant"),
-                    "content": denial_response.content,
-                    "metadata": getattr(
-                        denial_response,
-                        "metadata",
-                        None,
-                    ),
-                    "timestamp": str(ts) if ts is not None else "",
-                }
-                content.append([msg_dict, []])
-                modified = True
-
-            if modified:
-                with open(
-                    path,
-                    "w",
-                    encoding="utf-8",
-                    errors="surrogatepass",
-                ) as f:
-                    json.dump(states, f, ensure_ascii=False)
-                logger.info(
-                    "Tool guard: cleaned up denied session memory in %s",
-                    path,
-                )
-        except Exception:  # pylint: disable=broad-except
-            logger.warning(
-                "Failed to clean up denied messages from session %s",
-                session_id,
-                exc_info=True,
-            )
 
     async def init_handler(self, *args, **kwargs):
         """

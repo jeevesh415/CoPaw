@@ -2,21 +2,28 @@
 
 ## Roadmap table
 
-| Area                                  | Item                                                                                                                                             | Status               |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------- |
-| **Horizontal Expansion**              | More channels, models, skills, MCPs — **community contributions welcome**                                                                        | Seeking Contributors |
-| **Existing Feature Extension**        | Display optimization, download hints, Windows path compatibility, etc. — **community contributions welcome**                                     | Seeking Contributors |
-| **Console Web UI**                    | Expose more info/config in the Console                                                                                                           | In Progress          |
-| **Multi-agent**                       | Agentic Ralph Loop                                                                                                                               | In Progress          |
-| **Multimodal**                        | Voice/video calls and real-time interaction                                                                                                      | In Progress          |
-| **Small + Large Model Collaboration** | Multi-model routing; different models for different tasks                                                                                        | In Progress          |
-| **Memory System**                     | Experience distillation & skill extraction                                                                                                       | In Progress          |
-|                                       | Memory mechanism switching                                                                                                                       | In Progress          |
-|                                       | Multimodal memory fusion                                                                                                                         | Planned              |
-|                                       | Context-aware proactive delivery                                                                                                                 | Planned              |
-| **Sandbox**                           | Deeper integration with AgentScope Runtime sandboxes                                                                                             | In Progress          |
-| **Cloud-native**                      | Deeper integration with AgentScope Runtime; leverage cloud compute, storage, tools, and skills                                                   | In Progress          |
-| **Skills Hub**                        | Enrich the [AgentScope Skills](https://github.com/agentscope-ai/agentscope-skills) repository and improve discoverability of high-quality skills | Planned              |
+| Area                           | Item                                                                                                         | Status               |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------ | -------------------- |
+| **Horizontal Expansion**       | More channels, models, skills, MCPs — **community contributions welcome**                                    | Seeking Contributors |
+| **Existing Feature Extension** | Display optimization, download hints, Windows path compatibility, etc. — **community contributions welcome** | Seeking Contributors |
+| **Client Experience**          | Install, update, and packaging improvements                                                                  | In Progress          |
+| **Models**                     | Intelligent on-device / cloud model switching                                                                | In Progress          |
+|                                | OAuth                                                                                                        | Planned              |
+|                                | Response API                                                                                                 | Planned              |
+| **Proactivity**                | Cron jobs and heartbeat upgrades                                                                             | In Progress          |
+|                                | Proactive briefings and custom push                                                                          | In Progress          |
+|                                | Insight system: discover needs via conversation and interaction                                              | Planned              |
+| **Workspace**                  | File access control with Sandbox integration                                                                 | In Progress          |
+|                                | Subfolder layout (config, production files, etc.)                                                            | Planned              |
+| **Coding**                     | LSP, dedicated prompts, workspace versioning, runtime, and supporting infra                                  | Planned              |
+|                                | Lightweight native APIs                                                                                      | Planned              |
+|                                | Tool self-evolution                                                                                          | Planned              |
+|                                | Compatibility with existing agents (e.g. Claude Code)                                                        | Planned              |
+| **Multi-agent**                | Group chat                                                                                                   | Planned              |
+|                                | Subagent                                                                                                     | Planned              |
+|                                | HiClaw enterprise capabilities                                                                               | Planned              |
+| **Context Management**         | Intelligent context compression                                                                              | In Progress          |
+|                                | User-selectable compression (fine-grained control)                                                           | Planned              |
 
 _Status:_ _In Progress_ — actively being worked on; _Planned_ — queued or under design, also welcome contributions; _Seeking Contributors_ — we strongly encourage community contributions.
 

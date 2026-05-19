@@ -15,8 +15,9 @@ from typing import Any, Callable, Optional, TYPE_CHECKING
 
 from agentscope.message import Msg, TextBlock
 
-from ...constant import WORKING_DIR, PROJECT_NAME
+from ...constant import WORKING_DIR
 from ...config import load_config
+from ...utils.logging import LOG_NAMESPACE, LOG_FILE_PATH
 
 if TYPE_CHECKING:
     from ...config.config import AgentProfileConfig
@@ -31,7 +32,7 @@ class RestartInProgressError(Exception):
 
 DAEMON_PREFIX = "/daemon"
 DAEMON_SUBCOMMANDS = frozenset(
-    {"status", "restart", "reload-config", "version", "logs", "approve"},
+    {"status", "restart", "reload-config", "version", "logs"},
 )
 # Short names: /restart -> /daemon restart, etc.
 DAEMON_SHORT_ALIASES = {
@@ -41,11 +42,9 @@ DAEMON_SHORT_ALIASES = {
     "reload_config": "reload-config",
     "version": "version",
     "logs": "logs",
-    "approve": "approve",
 }
 
-LOG_NAMESPACE = PROJECT_NAME.lower()
-LOG_PATH = WORKING_DIR / f"{LOG_NAMESPACE}.log"
+LOG_PATH = LOG_FILE_PATH
 
 
 @dataclass
@@ -55,11 +54,13 @@ class DaemonContext:
     working_dir: Path = WORKING_DIR
     load_config_fn: Callable[[], Any] = load_config
     memory_manager: Optional[Any] = None
+    context_manager: Optional[Any] = None
     # For /daemon restart: manager and agent_id for zero-downtime reload
     manager: Optional["MultiAgentManager"] = None
     agent_id: Optional[str] = None
     # Session ID for approval commands.
     session_id: str = ""
+    agent_name: str = "QwenPaw"
 
 
 def _get_last_lines(
@@ -103,18 +104,36 @@ def run_daemon_status(context: DaemonContext) -> str:
     try:
         cfg = context.load_config_fn()
         parts.append("- Config loaded: yes")
-        # Support both AgentProfileConfig (has 'running' directly)
-        # and Config (has 'agents.running')
-        if hasattr(cfg, "running"):
-            max_in = getattr(cfg.running, "max_input_length", "N/A")
-            parts.append(f"- Max input length: {max_in}")
-        elif getattr(cfg, "agents", None) and getattr(
-            cfg.agents,
-            "running",
-            None,
-        ):
-            max_in = getattr(cfg.agents.running, "max_input_length", "N/A")
-            parts.append(f"- Max input length: {max_in}")
+        # max_input_length lives on ModelInfo; read it from the active
+        # model when an agent_id is available, otherwise fall back to
+        # the legacy running config field.
+        max_in: object = "N/A"
+        agent_id = getattr(context, "agent_id", None)
+        if agent_id:
+            try:
+                from ...config.config import (
+                    get_model_max_input_length,
+                    load_agent_config,
+                )
+
+                agent_cfg = load_agent_config(agent_id)
+                max_in = get_model_max_input_length(agent_cfg)
+            except Exception:
+                pass
+        if max_in == "N/A":
+            if hasattr(cfg, "running"):
+                max_in = getattr(cfg.running, "max_input_length", "N/A")
+            elif getattr(cfg, "agents", None) and getattr(
+                cfg.agents,
+                "running",
+                None,
+            ):
+                max_in = getattr(
+                    cfg.agents.running,
+                    "max_input_length",
+                    "N/A",
+                )
+        parts.append(f"- Max input length: {max_in}")
     except Exception as e:
         parts.append(f"- Config loaded: no ({e})")
 
@@ -123,6 +142,10 @@ def run_daemon_status(context: DaemonContext) -> str:
         parts.append("- Memory manager: running")
     else:
         parts.append("- Memory manager: not attached")
+    if context.context_manager is not None:
+        parts.append("- Context manager: running")
+    else:
+        parts.append("- Context manager: not attached")
     return "\n".join(parts)
 
 
@@ -186,46 +209,6 @@ def run_daemon_logs(lines: int = 100) -> str:
     return f"**Console log (last {lines} lines)**\n\n```\n{content}\n```"
 
 
-async def run_daemon_approve(
-    _context: DaemonContext,
-    session_id: str = "",
-) -> str:
-    """Resolve the next pending tool-guard approval for *session_id*.
-
-    Called when the user sends ``/daemon approve`` in the chat while a
-    tool-guard approval is pending.  The runner intercepts the message
-    before it reaches this function in most cases, but this serves as
-    a fallback and returns a helpful message when no approval is
-    pending.
-    """
-    try:
-        from ..approvals import get_approval_service
-        from ...security.tool_guard.approval import ApprovalDecision
-
-        svc = get_approval_service()
-        pending = await svc.get_pending_by_session(session_id)
-        if pending is None:
-            return (
-                "**No pending approval**\n\n"
-                "- There is no tool-guard approval waiting for this "
-                "session.\n"
-                "- This command is only valid when a sensitive tool "
-                "call is awaiting your review."
-            )
-        await svc.resolve_request(
-            pending.request_id,
-            ApprovalDecision.APPROVED,
-        )
-        return (
-            f"**Tool execution approved** ✅\n\n"
-            f"- Tool: `{pending.tool_name}`\n"
-            f"- Request: `{pending.request_id[:8]}…`"
-        )
-    except Exception as exc:
-        logger.warning("run_daemon_approve error: %s", exc, exc_info=True)
-        return f"**Approve failed**\n\n- {exc}"
-
-
 def parse_daemon_query(query: str) -> Optional[tuple[str, list[str]]]:
     """Parse /daemon <sub> or /<short>. Return (subcommand, args) or None."""
     if not query or not isinstance(query, str):
@@ -271,7 +254,7 @@ class DaemonCommandHandlerMixin:
         parsed = parse_daemon_query(query)
         if not parsed:
             return Msg(
-                name="Friday",
+                name=context.agent_name,
                 role="assistant",
                 content=[
                     TextBlock(type="text", text="Unknown daemon command."),
@@ -293,14 +276,11 @@ class DaemonCommandHandlerMixin:
                     n = max(1, min(int(a), 2000))
                     break
             text = run_daemon_logs(lines=n)
-        elif sub == "approve":
-            session_id = getattr(context, "session_id", "") or ""
-            text = await run_daemon_approve(context, session_id=session_id)
         else:
             text = "Unknown daemon subcommand."
         logger.info("handle_daemon_command %s completed", query)
         return Msg(
-            name="Friday",
+            name=context.agent_name,
             role="assistant",
             content=[TextBlock(type="text", text=text)],
         )

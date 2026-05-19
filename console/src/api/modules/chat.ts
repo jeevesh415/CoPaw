@@ -43,7 +43,8 @@ export const chatApi = {
     if (!filename) return "";
     if (filename.startsWith("http://") || filename.startsWith("https://"))
       return filename;
-    const path = `${FILES_PREVIEW}/${filename.replace(/^\/+/, "")}`;
+    let cleaned = filename.replace(/^\/+/, "");
+    const path = `${FILES_PREVIEW}/${cleaned}`;
     const url = getApiUrl(path);
 
     const token = getApiToken();

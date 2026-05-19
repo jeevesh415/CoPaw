@@ -3,9 +3,9 @@ import {
   Button,
   Form,
   Input,
+  InputNumber,
   Modal,
   Tag,
-  Checkbox,
   Tooltip,
 } from "@agentscope-ai/design";
 import { AutoComplete } from "antd";
@@ -14,7 +14,6 @@ import {
   PlusOutlined,
   ApiOutlined,
   EyeOutlined,
-  FilterOutlined,
   SettingOutlined,
   DownOutlined,
   SearchOutlined,
@@ -25,15 +24,8 @@ import {
   QuestionCircleOutlined,
   DatabaseOutlined,
   UserOutlined,
+  GiftOutlined,
 } from "@ant-design/icons";
-import {
-  SparkTextLine,
-  SparkImageuploadLine,
-  SparkAudiouploadLine,
-  SparkVideouploadLine,
-  SparkFilePdfLine,
-  SparkTextImageLine,
-} from "@agentscope-ai/icons";
 import type {
   ProviderInfo,
   SeriesResponse,
@@ -50,6 +42,7 @@ import {
   getLocalizedTestConnectionMessage,
   getTestConnectionFailureDetail,
 } from "./testConnectionMessage";
+import { OpenRouterFilterSection } from "./OpenRouterFilterSection";
 import styles from "../../index.module.less";
 
 function ModelConfigEditor({
@@ -69,6 +62,13 @@ function ModelConfigEditor({
   const { message } = useAppMessage();
   const [saving, setSaving] = useState(false);
 
+  const [maxTokens, setMaxTokens] = useState<number | null>(
+    model.max_tokens ?? 8192,
+  );
+  const [maxInputLength, setMaxInputLength] = useState<number | null>(
+    model.max_input_length ?? 131072,
+  );
+
   const initialText = useMemo(
     () =>
       model.generate_kwargs && Object.keys(model.generate_kwargs).length > 0
@@ -82,16 +82,28 @@ function ModelConfigEditor({
 
   useEffect(() => {
     setText(initialText);
+    setMaxTokens(model.max_tokens ?? 8192);
+    setMaxInputLength(model.max_input_length ?? 131072);
     setDirty(false);
-  }, [initialText]);
+  }, [initialText, model.max_tokens, model.max_input_length]);
 
-  const handleChange = useCallback(
-    (val: string) => {
-      setText(val);
-      setDirty(val !== initialText);
-    },
-    [initialText],
-  );
+  const effectiveMaxTokens = maxTokens ?? 8192;
+  const effectiveMaxInputLength = maxInputLength ?? 131072;
+
+  const handleChange = useCallback((val: string) => {
+    setText(val);
+    setDirty(true);
+  }, []);
+
+  const handleMaxTokensChange = useCallback((val: number | null) => {
+    setMaxTokens(val);
+    setDirty(true);
+  }, []);
+
+  const handleMaxInputLengthChange = useCallback((val: number | null) => {
+    setMaxInputLength(val);
+    setDirty(true);
+  }, []);
 
   const handleSave = async () => {
     const trimmed = text.trim();
@@ -113,6 +125,8 @@ function ModelConfigEditor({
     setSaving(true);
     try {
       await api.configureModel(providerId, model.id, {
+        max_tokens: effectiveMaxTokens,
+        max_input_length: effectiveMaxInputLength,
         generate_kwargs: parsed,
       });
       message.success(t("models.modelConfigSaved", { name: model.name }));
@@ -130,8 +144,63 @@ function ModelConfigEditor({
     }
   };
 
+  const labelStyle: React.CSSProperties = {
+    fontSize: 13,
+    color: isDark ? "rgba(255,255,255,0.85)" : "#333",
+    marginBottom: 4,
+  };
+
   return (
     <div style={{ padding: "8px 0 4px" }}>
+      <div style={{ display: "flex", gap: 16, marginBottom: 12 }}>
+        <div style={{ flex: 1 }}>
+          <div style={labelStyle}>
+            {t("models.maxTokensLabel", "Max Tokens")}
+          </div>
+          <InputNumber
+            style={{ width: "100%" }}
+            min={1}
+            step={1024}
+            value={maxTokens}
+            placeholder="8192"
+            onChange={handleMaxTokensChange}
+          />
+          <div
+            style={{
+              fontSize: 11,
+              color: isDark ? "rgba(255,255,255,0.35)" : "#999",
+              marginTop: 2,
+            }}
+          >
+            {t("models.maxTokensHint", "每次响应的最大输出 token 数")}
+          </div>
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={labelStyle}>
+            {t("models.maxInputLengthLabel", "Max Context Length")}
+          </div>
+          <InputNumber
+            style={{ width: "100%" }}
+            min={1000}
+            step={1024}
+            value={maxInputLength}
+            placeholder="131072"
+            onChange={handleMaxInputLengthChange}
+          />
+          <div
+            style={{
+              fontSize: 11,
+              color: isDark ? "rgba(255,255,255,0.35)" : "#999",
+              marginTop: 2,
+            }}
+          >
+            {t(
+              "models.maxInputLengthHint",
+              "模型上下文窗口大小，控制上下文压缩阈值（≥1000）",
+            )}
+          </div>
+        </div>
+      </div>
       <div
         style={{
           fontSize: 12,
@@ -144,7 +213,7 @@ function ModelConfigEditor({
       <JsonConfigEditor
         value={text}
         onChange={handleChange}
-        placeholder={`Example:\n{\n  "extra_body": {\n    "enable_thinking": false\n  },\n  "max_tokens": 2048\n}`}
+        placeholder={`Example:\n{\n  "extra_body": {\n    "enable_thinking": false\n  }\n}`}
       />
       <div
         style={{
@@ -195,6 +264,11 @@ const tagColors = (isDark: boolean) => ({
     borderColor: isDark ? "rgba(255,255,255,0.15)" : "#d9d9d9",
   },
   builtin: {
+    backgroundColor: isDark ? "rgba(82,196,26,0.15)" : "#f6ffed",
+    color: "#52c41a",
+    borderColor: isDark ? "rgba(82,196,26,0.3)" : "#b7eb8f",
+  },
+  free: {
     backgroundColor: isDark ? "rgba(82,196,26,0.15)" : "#f6ffed",
     color: "#52c41a",
     borderColor: isDark ? "rgba(82,196,26,0.3)" : "#b7eb8f",
@@ -291,9 +365,10 @@ export function RemoteModelManageModal({
     [],
   );
   const [selectedSeries, setSelectedSeries] = useState<string[]>([]);
-  const [selectedInputModality, setSelectedInputModality] = useState<
-    string | null
-  >(null);
+  const [selectedInputModalities, setSelectedInputModalities] = useState<
+    string[]
+  >([]);
+  const [showFreeOnly, setShowFreeOnly] = useState(false);
   const [loadingFilters, setLoadingFilters] = useState(false);
 
   const [loadingDiscoveredModels, setLoadingDiscoveredModels] = useState(false);
@@ -315,6 +390,15 @@ export function RemoteModelManageModal({
       const values = await form.validateFields();
       const id = values.id.trim();
       const name = values.name?.trim() || id;
+      const modelAlreadyExists = [
+        ...(provider.models ?? []),
+        ...(provider.extra_models ?? []),
+      ].some((model) => model.id.trim() === id);
+
+      if (modelAlreadyExists) {
+        message.warning(t("models.modelAlreadyExists", { id }));
+        return;
+      }
 
       // Step 1: Test the model connection first
       setSaving(true);
@@ -456,10 +540,17 @@ export function RemoteModelManageModal({
       api
         .getOpenRouterSeries()
         .then((res: SeriesResponse) => {
-          setAvailableSeries(res.series || []);
+          const series = res.series || [];
+          setAvailableSeries(series);
+          setSelectedSeries((prev) =>
+            prev.length === 0
+              ? series
+              : prev.filter((item) => series.includes(item)),
+          );
         })
         .catch(() => {
           setAvailableSeries([]);
+          setSelectedSeries([]);
         });
     }
   }, [isOpenRouter]);
@@ -471,11 +562,17 @@ export function RemoteModelManageModal({
     setLoadingFilters(true);
     try {
       const filterBody: Record<string, unknown> = {};
-      if (selectedSeries.length > 0) {
+      const hasPartialProviderSelection =
+        selectedSeries.length > 0 &&
+        selectedSeries.length < availableSeries.length;
+      if (hasPartialProviderSelection) {
         filterBody.providers = selectedSeries;
       }
-      if (selectedInputModality) {
-        filterBody.input_modalities = [selectedInputModality];
+      if (selectedInputModalities.length > 0) {
+        filterBody.input_modalities = selectedInputModalities;
+      }
+      if (showFreeOnly) {
+        filterBody.is_free = true;
       }
 
       const result = await api.filterOpenRouterModels(filterBody);
@@ -497,7 +594,15 @@ export function RemoteModelManageModal({
   const handleAddFilteredModel = async (model: ExtendedModelInfo) => {
     setSaving(true);
     try {
-      await api.addModel(provider.id, { id: model.id, name: model.name });
+      await api.addModel(provider.id, {
+        id: model.id,
+        name: model.name,
+        is_free: model.is_free,
+        supports_multimodal: model.supports_multimodal,
+        supports_image: model.supports_image,
+        supports_video: model.supports_video,
+        probe_source: model.probe_source,
+      });
       message.success(t("models.modelAdded", { name: model.name }));
       await onSaved();
       setDiscoveredModels((prev) => prev.filter((m) => m.id !== model.id));
@@ -572,8 +677,8 @@ export function RemoteModelManageModal({
 
   const filteredModels = useMemo(() => {
     const all_models = [
-      ...(provider.models ?? []),
       ...(provider.extra_models ?? []),
+      ...(provider.models ?? []),
     ];
     const q = modelSearchQuery.trim().toLowerCase();
     if (!q) return all_models;
@@ -618,6 +723,20 @@ export function RemoteModelManageModal({
                   </div>
                   <div className={styles.modelListItemActions}>
                     <CapabilityTags model={m} isDark={isDark} />
+                    {m.is_free && (
+                      <Tag
+                        style={{
+                          fontSize: 11,
+                          marginRight: 4,
+                          ...colors.free,
+                        }}
+                      >
+                        <GiftOutlined
+                          style={{ fontSize: 10, marginRight: 3 }}
+                        />
+                        {t("models.free")}
+                      </Tag>
+                    )}
                     <Tag
                       style={{
                         fontSize: 11,
@@ -648,16 +767,20 @@ export function RemoteModelManageModal({
                         flexShrink: 0,
                       }}
                     />
-                    <Tooltip title={t("models.probeMultimodal", "测试多模态")}>
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<ExperimentOutlined />}
-                        onClick={() => handleProbeMultimodal(m.id)}
-                        loading={probingModelId === m.id}
-                        style={darkBtnStyle}
-                      />
-                    </Tooltip>
+                    {m.probe_source !== "documentation" && (
+                      <Tooltip
+                        title={t("models.probeMultimodal", "测试多模态")}
+                      >
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<ExperimentOutlined />}
+                          onClick={() => handleProbeMultimodal(m.id)}
+                          loading={probingModelId === m.id}
+                          style={darkBtnStyle}
+                        />
+                      </Tooltip>
+                    )}
                     <Tooltip title={t("models.testConnection")}>
                       <Button
                         type="text"
@@ -716,204 +839,25 @@ export function RemoteModelManageModal({
         )}
       </div>
 
-      {/* OpenRouter Filter Section */}
       {isOpenRouter && (
-        <div style={{ marginTop: 16, marginBottom: 16 }}>
-          <Button
-            type={showFilters ? "primary" : "default"}
-            icon={<FilterOutlined />}
-            onClick={() => setShowFilters(!showFilters)}
-            style={{ width: "100%", marginBottom: showFilters ? 8 : 0 }}
-          >
-            {t("models.filterModels") || "Filter Models"}
-          </Button>
-
-          {showFilters && (
-            <div
-              style={{
-                padding: 12,
-                background: "#f5f5f5",
-                borderRadius: 8,
-              }}
-            >
-              {/* Provider/Series Filter */}
-              <div style={{ marginBottom: 12 }}>
-                <div style={{ marginBottom: 4, fontWeight: 500 }}>
-                  {t("models.filterByProvider") || "Provider:"}
-                </div>
-                <Checkbox.Group
-                  options={availableSeries.map((s) => ({
-                    label: s,
-                    value: s,
-                  }))}
-                  value={selectedSeries}
-                  onChange={(vals) => setSelectedSeries(vals as string[])}
-                  style={{ display: "flex", flexWrap: "wrap", gap: 8 }}
-                />
-              </div>
-
-              {/* Input Modality Filter */}
-              <div style={{ marginBottom: 12 }}>
-                <div style={{ marginBottom: 4, fontWeight: 500 }}>
-                  {t("models.filterByModality") || "Input Modality:"}
-                </div>
-                <Checkbox.Group
-                  options={[
-                    {
-                      label: (
-                        <>
-                          <SparkImageuploadLine /> {t("models.modalityVision")}
-                        </>
-                      ),
-                      value: "image",
-                    },
-                    {
-                      label: (
-                        <>
-                          <SparkAudiouploadLine /> {t("models.modalityAudio")}
-                        </>
-                      ),
-                      value: "audio",
-                    },
-                    {
-                      label: (
-                        <>
-                          <SparkVideouploadLine /> {t("models.modalityVideo")}
-                        </>
-                      ),
-                      value: "video",
-                    },
-                    {
-                      label: (
-                        <>
-                          <SparkFilePdfLine /> {t("models.modalityFile")}
-                        </>
-                      ),
-                      value: "file",
-                    },
-                    {
-                      label: (
-                        <>
-                          <SparkTextLine /> {t("models.modalityText")}
-                        </>
-                      ),
-                      value: "text",
-                    },
-                  ]}
-                  value={selectedInputModality ? [selectedInputModality] : []}
-                  onChange={(vals) =>
-                    setSelectedInputModality(
-                      vals.length > 0 ? (vals[0] as string) : null,
-                    )
-                  }
-                  style={{ display: "flex", flexWrap: "wrap", gap: 8 }}
-                />
-              </div>
-
-              {/* Fetch Button */}
-              <Button
-                type="primary"
-                onClick={handleFetchModels}
-                loading={loadingFilters}
-                style={{ width: "100%" }}
-              >
-                {t("models.getModels") || "Get Models"}
-              </Button>
-
-              {/* Discovered Models List */}
-              {discoveredModels.length > 0 && (
-                <div
-                  style={{
-                    marginTop: 12,
-                    maxHeight: 200,
-                    overflowY: "auto",
-                  }}
-                >
-                  <div style={{ fontWeight: 500, marginBottom: 4 }}>
-                    {t("models.discovered") || "Available Models:"}
-                  </div>
-                  {discoveredModels.map((model) => (
-                    <div
-                      key={model.id}
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        padding: "4px 8px",
-                        background: "white",
-                        marginBottom: 4,
-                        borderRadius: 4,
-                      }}
-                    >
-                      <div>
-                        <div style={{ fontWeight: 500 }}>{model.name}</div>
-                        <div
-                          style={{
-                            fontSize: 11,
-                            color: "#666",
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 4,
-                          }}
-                        >
-                          <span>{model.provider}</span>
-                          {model.input_modalities?.includes("text") && (
-                            <SparkTextLine style={{ fontSize: 12 }} />
-                          )}
-                          {model.input_modalities?.includes("image") && (
-                            <SparkImageuploadLine style={{ fontSize: 12 }} />
-                          )}
-                          {model.input_modalities?.includes("audio") && (
-                            <SparkAudiouploadLine style={{ fontSize: 12 }} />
-                          )}
-                          {model.input_modalities?.includes("video") && (
-                            <SparkVideouploadLine style={{ fontSize: 12 }} />
-                          )}
-                          {model.input_modalities?.includes("file") && (
-                            <SparkFilePdfLine style={{ fontSize: 12 }} />
-                          )}
-                          {model.output_modalities?.includes("image") && (
-                            <SparkTextImageLine
-                              style={{ fontSize: 12, color: "purple" }}
-                            />
-                          )}
-                          {model.pricing?.prompt && (
-                            <span style={{ color: "green", marginLeft: 4 }}>
-                              $
-                              {(
-                                parseFloat(model.pricing.prompt) * 1_000_000
-                              ).toFixed(2)}
-                              {t("models.perMillionIn")}
-                              {model.pricing?.completion && (
-                                <span>
-                                  {" "}
-                                  · $
-                                  {(
-                                    parseFloat(model.pricing.completion) *
-                                    1_000_000
-                                  ).toFixed(2)}
-                                  {t("models.perMillionOut")}
-                                </span>
-                              )}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <Button
-                        size="small"
-                        type="primary"
-                        onClick={() => handleAddFilteredModel(model)}
-                        disabled={saving}
-                      >
-                        {t("models.add") || "Add"}
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+        <OpenRouterFilterSection
+          showFilters={showFilters}
+          availableSeries={availableSeries}
+          selectedSeries={selectedSeries}
+          selectedInputModalities={selectedInputModalities}
+          showFreeOnly={showFreeOnly}
+          loadingFilters={loadingFilters}
+          discoveredModels={discoveredModels}
+          saving={saving}
+          isDark={isDark}
+          freeTagStyle={colors.free}
+          onToggleFilters={() => setShowFilters(!showFilters)}
+          onSelectedSeriesChange={setSelectedSeries}
+          onSelectedInputModalitiesChange={setSelectedInputModalities}
+          onShowFreeOnlyChange={setShowFreeOnly}
+          onFetchModels={handleFetchModels}
+          onAddModel={handleAddFilteredModel}
+        />
       )}
 
       {/* Add model section */}

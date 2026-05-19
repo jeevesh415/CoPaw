@@ -20,6 +20,11 @@ from typing import Any, Dict
 
 from qwenpaw.exceptions import SystemCommandException
 from .base import BaseControlCommandHandler, ControlContext
+from .approval_handler import (
+    ApprovalCommandHandler,
+    ApproveCommandHandler,
+    DenyCommandHandler,
+)
 from .model_handler import ModelCommandHandler
 from .skills_handler import SkillsCommandHandler
 from .stop_handler import StopCommandHandler
@@ -32,6 +37,9 @@ _COMMAND_REGISTRY: Dict[str, BaseControlCommandHandler] = {}
 
 def _register_defaults() -> None:
     """Register default control command handlers."""
+    register_command(ApprovalCommandHandler())
+    register_command(ApproveCommandHandler())
+    register_command(DenyCommandHandler())
     register_command(StopCommandHandler())
     register_command(ModelCommandHandler())
     register_command(SkillsCommandHandler())
@@ -59,10 +67,35 @@ def register_command(handler: BaseControlCommandHandler) -> None:
         )
 
     _COMMAND_REGISTRY[command] = handler
-    logger.info(
+    logger.debug(
         f"Registered control command: {command} "
         f"→ {handler.__class__.__name__}",
     )
+
+
+def unregister_command(command_name: str) -> bool:
+    """Remove a plugin control command handler from the global registry.
+
+    Only plugin-registered commands should be removed at runtime.
+    Default built-in handlers (/stop, /model, etc.) are never removed.
+
+    Args:
+        command_name: Command name to remove (e.g. ``"mystatus"``
+            or ``"/mystatus"``; leading slash is stripped).
+
+    Returns:
+        ``True`` if the command was found and removed, ``False``
+        otherwise.
+    """
+    key = command_name.lstrip("/").lower()
+    if key not in _COMMAND_REGISTRY:
+        logger.warning(
+            f"unregister_command: '{command_name}' not found in registry",
+        )
+        return False
+    del _COMMAND_REGISTRY[key]
+    logger.info(f"Unregistered control command: /{key}")
+    return True
 
 
 def _extract_command_token(query: str | None) -> str | None:
@@ -110,6 +143,14 @@ def parse_args(query: str, command_prefix: str) -> Dict[str, Any]:
 
         parse_args("/model openai:gpt-4o", "/model")
         → {"_raw_args": "openai:gpt-4o"}
+
+        parse_args("/approval approve abc123", "/approval")
+        → {"action": "approve", "request_id": "abc123",
+           "_raw_args": "approve abc123"}
+
+        parse_args("/approval deny abc123 wrong params", "/approval")
+        → {"action": "deny", "request_id": "abc123",
+           "reason": "wrong params", "_raw_args": "deny abc123 wrong params"}
     """
     args: Dict[str, Any] = {}
 
@@ -122,8 +163,31 @@ def parse_args(query: str, command_prefix: str) -> Dict[str, Any]:
     if not args_str:
         return args
 
-    # Parse key=value pairs
+    # Split args into parts
     parts = args_str.split()
+
+    # Special parsing for /approval command
+    if command_prefix.lower() == "/approval" and parts:
+        # First part is action (approve/deny/list/cancel)
+        args["action"] = parts[0].lower()
+
+        # Parse flags for list command (--all / -a)
+        if args["action"] == "list" and len(parts) > 1:
+            for part in parts[1:]:
+                if part in ("--all", "-a"):
+                    args["all"] = True
+
+        # Second part (if exists) is request_id
+        if len(parts) > 1 and not parts[1].startswith("-"):
+            args["request_id"] = parts[1]
+
+        # Remaining parts (for deny) are reason
+        if len(parts) > 2 and args["action"] == "deny":
+            args["reason"] = " ".join(parts[2:])
+
+        return args
+
+    # Default parsing: key=value pairs
     for part in parts:
         if "=" in part:
             key, value = part.split("=", 1)
@@ -178,12 +242,16 @@ _register_defaults()
 
 # Export public API
 __all__ = [
+    "ApprovalCommandHandler",
+    "ApproveCommandHandler",
     "BaseControlCommandHandler",
     "ControlContext",
+    "DenyCommandHandler",
     "ModelCommandHandler",
     "SkillsCommandHandler",
     "StopCommandHandler",
     "is_control_command",
     "handle_control_command",
     "register_command",
+    "unregister_command",
 ]

@@ -18,6 +18,7 @@ import base64
 import hashlib
 import logging
 import os
+import re
 import sys
 import threading
 from collections import OrderedDict
@@ -42,10 +43,36 @@ from ..base import (
     OutgoingContentPart,
     ProcessHandler,
 )
+from .cards import WecomCardHandler
 from .utils import compress_image_for_wecom, format_markdown_tables
-from ..utils import split_text
+from ..utils import file_url_to_local_path, split_text
 
 logger = logging.getLogger(__name__)
+
+# Bridge aibot SDK logs to Python standard logging so that the
+# level is controlled by the project's logging configuration.
+_sdk_logger = logging.getLogger("aibot")
+
+
+class _SdkLoggerAdapter:
+    """Adapter that satisfies the aibot SDK ``Logger`` protocol
+    and delegates to a standard ``logging.Logger``."""
+
+    def __init__(self, std_logger: logging.Logger) -> None:
+        self._log = std_logger
+
+    def debug(self, message: str, *args: object) -> None:
+        self._log.debug(message, *args)
+
+    def info(self, message: str, *args: object) -> None:
+        self._log.info(message, *args)
+
+    def warn(self, message: str, *args: object) -> None:
+        self._log.warning(message, *args)
+
+    def error(self, message: str, *args: object) -> None:
+        self._log.error(message, *args)
+
 
 # Max number of processed message_ids to keep for dedup.
 _WECOM_PROCESSED_IDS_MAX = 2000
@@ -57,6 +84,13 @@ _UPLOAD_CMD_CHUNK = "aibot_upload_media_chunk"
 _UPLOAD_CMD_FINISH = "aibot_upload_media_finish"
 _UPLOAD_CMDS = (_UPLOAD_CMD_INIT, _UPLOAD_CMD_CHUNK, _UPLOAD_CMD_FINISH)
 _UPLOAD_ACK_TIMEOUT = 30.0  # seconds to wait for each upload ack
+
+# Keepalive for "🤔 Thinking..." stream: refresh to avoid WeCom
+# server-side timeout; force-finish before the limit so later replies
+# can start a fresh stream_id (issue #3947).
+_PROCESSING_REFRESH_INTERVAL = 20.0
+_PROCESSING_MAX_DURATION = 180.0
+_PROCESSING_TEXT = "🤔 Thinking..."
 
 # Map ContentType → wecom msgtype used in send_message.
 _MEDIA_MSGTYPE: Dict[str, str] = {
@@ -105,6 +139,8 @@ class WecomChannel(BaseChannel):
         bot_prefix: str = "",
         media_dir: str = "",
         welcome_text: str = "",
+        share_session_in_group: bool = True,
+        workspace_dir: Path | None = None,
         on_reply_sent: OnReplySent = None,
         show_tool_details: bool = True,
         filter_tool_messages: bool = False,
@@ -114,6 +150,7 @@ class WecomChannel(BaseChannel):
         allow_from: Optional[List[str]] = None,
         deny_message: str = "",
         max_reconnect_attempts: int = -1,
+        streaming_enabled: bool = False,
     ):
         super().__init__(
             process,
@@ -125,21 +162,38 @@ class WecomChannel(BaseChannel):
             group_policy=group_policy,
             allow_from=allow_from,
             deny_message=deny_message,
+            streaming_enabled=streaming_enabled,
         )
         self.enabled = enabled
         self.bot_id = bot_id
         self.secret = secret
         self.bot_prefix = bot_prefix
         self.welcome_text = welcome_text
-        self._media_dir = (
-            Path(media_dir).expanduser() if media_dir else DEFAULT_MEDIA_DIR
+        self.share_session_in_group = share_session_in_group
+        self._workspace_dir = (
+            Path(workspace_dir).expanduser() if workspace_dir else None
         )
+        # Use workspace-specific media dir if workspace_dir is provided
+        if not media_dir and self._workspace_dir:
+            self._media_dir = self._workspace_dir / "media"
+        elif media_dir:
+            self._media_dir = Path(media_dir).expanduser()
+        else:
+            self._media_dir = DEFAULT_MEDIA_DIR
         self._max_reconnect_attempts = max_reconnect_attempts
 
         self._client: Any = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._ws_loop: Optional[asyncio.AbstractEventLoop] = None
         self._ws_thread: Optional[threading.Thread] = None
+
+        # Keepalive tasks keyed by stream_id (kept off `meta` so the
+        # payload stays JSON-serializable).
+        self._keepalive_tasks: Dict[str, "asyncio.Task[None]"] = {}
+
+        # Sessions with in-flight model responses (suppress extra
+        # "Thinking…" indicators).
+        self._processing_sessions: set[str] = set()
 
         # message_id dedup (ordered dict, trimmed when over limit)
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()
@@ -148,6 +202,9 @@ class WecomChannel(BaseChannel):
         # pending upload-ack futures: req_id -> Future[WsFrame]
         self._upload_ack_futures: Dict[str, "asyncio.Future[Any]"] = {}
         self._upload_lock: Optional[asyncio.Lock] = None  # init in start()
+
+        # Interactive card handler (tool-guard approval cards).
+        self._card_handler = WecomCardHandler(self)
 
     @classmethod
     def from_env(
@@ -168,6 +225,11 @@ class WecomChannel(BaseChannel):
             secret=os.getenv("WECOM_SECRET", ""),
             bot_prefix=os.getenv("WECOM_BOT_PREFIX", ""),
             media_dir=os.getenv("WECOM_MEDIA_DIR", ""),
+            share_session_in_group=os.getenv(
+                "WECOM_SHARE_SESSION_IN_GROUP",
+                "1",
+            )
+            == "1",
             on_reply_sent=on_reply_sent,
             dm_policy=os.getenv("WECOM_DM_POLICY", "open"),
             group_policy=os.getenv("WECOM_GROUP_POLICY", "open"),
@@ -187,6 +249,7 @@ class WecomChannel(BaseChannel):
         show_tool_details: bool = True,
         filter_tool_messages: bool = False,
         filter_thinking: bool = False,
+        workspace_dir: Path | None = None,
     ) -> "WecomChannel":
         return cls(
             process=process,
@@ -196,6 +259,10 @@ class WecomChannel(BaseChannel):
             bot_prefix=getattr(config, "bot_prefix", "") or "",
             media_dir=getattr(config, "media_dir", None) or "",
             welcome_text=getattr(config, "welcome_text", "") or "",
+            share_session_in_group=bool(
+                getattr(config, "share_session_in_group", True),
+            ),
+            workspace_dir=workspace_dir,
             on_reply_sent=on_reply_sent,
             show_tool_details=show_tool_details,
             filter_tool_messages=filter_tool_messages,
@@ -210,6 +277,9 @@ class WecomChannel(BaseChannel):
                     if getattr(config, "max_reconnect_attempts", None) is None
                     else getattr(config, "max_reconnect_attempts")
                 ),
+            ),
+            streaming_enabled=bool(
+                getattr(config, "streaming_enabled", False),
             ),
         )
 
@@ -291,15 +361,43 @@ class WecomChannel(BaseChannel):
         return request
 
     def merge_native_items(self, items: List[Any]) -> Any:
-        """Merge same-session native payloads: concat content_parts."""
+        """Merge same-session native payloads: concat content_parts.
+
+        Reuses the first processing_stream_id so the existing
+        "Thinking…" bubble is taken over by the real reply.
+        """
         if not items:
             return None
         first = items[0] if isinstance(items[0], dict) else {}
         merged_parts: List[Any] = []
+
+        # Reuse the first processing_stream_id; cancel extras.
+        reuse_sid = ""
+        reuse_frame = None
+        for item in items:
+            meta = (item if isinstance(item, dict) else {}).get("meta") or {}
+            sid = meta.get("wecom_processing_stream_id", "")
+            if sid and not reuse_sid:
+                reuse_sid = sid
+                reuse_frame = meta.get("wecom_frame")
+            elif sid:
+                # Extra processing indicator — cancel its keepalive.
+                task = self._keepalive_tasks.pop(sid, None)
+                if task is not None and not task.done():
+                    task.cancel()
+
         for it in items:
             p = it if isinstance(it, dict) else {}
             merged_parts.extend(p.get("content_parts") or [])
         last = items[-1] if isinstance(items[-1], dict) else {}
+
+        merged_meta = dict(last.get("meta") or {})
+
+        if reuse_sid:
+            merged_meta["wecom_processing_stream_id"] = reuse_sid
+            if reuse_frame is not None:
+                merged_meta["wecom_frame"] = reuse_frame
+
         return {
             "channel_id": first.get("channel_id") or self.channel,
             "sender_id": last.get(
@@ -312,7 +410,7 @@ class WecomChannel(BaseChannel):
                 first.get("session_id", ""),
             ),
             "content_parts": merged_parts,
-            "meta": dict(last.get("meta") or {}),
+            "meta": merged_meta,
         }
 
     # ------------------------------------------------------------------
@@ -365,6 +463,24 @@ class WecomChannel(BaseChannel):
             if msgtype == "text":
                 text = (body.get("text") or {}).get("content", "").strip()
                 if text:
+                    # In group chat, strip @mention only when it wraps a
+                    # slash command, to preserve normal conversation text.
+                    if chat_type == "group":
+                        text = re.sub(
+                            r"^@\S+\s+(?=/)",
+                            "",
+                            text,
+                        ).strip()
+                        text = (
+                            re.sub(
+                                r"@\S+$",
+                                "",
+                                text,
+                            )
+                            if text.startswith("/")
+                            else text
+                        )
+                        text = text.strip()
                     text_parts.append(text)
 
             elif msgtype == "image":
@@ -414,6 +530,7 @@ class WecomChannel(BaseChannel):
                             FileContent(
                                 type=ContentType.FILE,
                                 file_url=path,
+                                filename=filename,
                             ),
                         )
                     else:
@@ -471,6 +588,29 @@ class WecomChannel(BaseChannel):
                                 )
                             else:
                                 text_parts.append("[image: download failed]")
+                    elif itype == "file":
+                        file_info = item.get("file") or {}
+                        url = file_info.get("url") or ""
+                        aes_key = file_info.get("aeskey") or ""
+                        filename = file_info.get("filename") or "file.bin"
+                        if url:
+                            path = await self._download_media(
+                                url,
+                                aes_key=aes_key,
+                                filename_hint=filename,
+                            )
+                            if path:
+                                content_parts.append(
+                                    FileContent(
+                                        type=ContentType.FILE,
+                                        file_url=path,
+                                        filename=filename,
+                                    ),
+                                )
+                            else:
+                                text_parts.append("[file: download failed]")
+                        else:
+                            text_parts.append("[file: no url]")
             else:
                 text_parts.append(f"[{msgtype}]")
 
@@ -571,29 +711,46 @@ class WecomChannel(BaseChannel):
                 )
                 return
 
-            # Send "processing" indicator only if message has text content
+            session_id = self.resolve_session_id(sender_id, meta)
+
+            # Only show "Thinking…" when session is idle.
             processing_stream_id = ""
-            if text_parts and self._client:
+            session_is_busy = session_id in self._processing_sessions
+            if text_parts and self._client and not session_is_busy:
                 processing_stream_id = generate_req_id("stream")
                 try:
                     await self._client.reply_stream(
                         frame,
                         stream_id=processing_stream_id,
-                        content="🤔 Thinking...",
+                        content=_PROCESSING_TEXT,
                         finish=False,
                     )
                 except Exception:
                     logger.debug("wecom failed to send processing indicator")
-
-            session_id = self.resolve_session_id(sender_id, meta)
+                    processing_stream_id = ""
             if processing_stream_id:
                 meta["wecom_processing_stream_id"] = processing_stream_id
+                # Keep stream alive while agent is generating.
+                self._keepalive_tasks[
+                    processing_stream_id
+                ] = asyncio.create_task(
+                    self._keepalive_processing(
+                        frame,
+                        processing_stream_id,
+                    ),
+                )
             native = {
                 "channel_id": self.channel,
                 "sender_id": sender_id,
-                # Group chats share one session; omit user_id so the
-                # session file is keyed by session_id only.
-                "user_id": "" if is_group else sender_id,
+                # Group chats: all members share one chat by default
+                # (user_id="group"); when share_session_in_group is
+                # False, use sender_id so each member is isolated.
+                # session_id stays group-level for reply routing.
+                "user_id": (
+                    "group"
+                    if (is_group and self.share_session_in_group)
+                    else sender_id
+                ),
                 "session_id": session_id,
                 "content_parts": content_parts,
                 "meta": meta,
@@ -655,7 +812,12 @@ class WecomChannel(BaseChannel):
                 fn = (Path(fn).stem or "file") + hint_ext
             self._media_dir.mkdir(parents=True, exist_ok=True)
             safe_name = (
-                "".join(c for c in fn if c.isalnum() or c in "-_.") or "media"
+                "".join(
+                    c
+                    for c in fn.replace("企业微信截图", "screenshot")
+                    if c.isalnum() or c in "-_."
+                )
+                or "media"
             )
             url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
             path = self._media_dir / f"wecom_{url_hash}_{safe_name}"
@@ -679,12 +841,29 @@ class WecomChannel(BaseChannel):
         Returns the ack frame body dict, or raises on timeout / error.
         """
         req_id = generate_req_id(cmd)
-        loop = asyncio.get_event_loop()
-        fut: asyncio.Future[Any] = loop.create_future()
+        # Use the main event loop for the future (response handling)
+        main_loop = asyncio.get_running_loop()
+        fut: asyncio.Future[Any] = main_loop.create_future()
+
+        # WebSocket operations must run in the WS thread's event loop
+        ws_loop = self._ws_loop
+        if ws_loop is None:
+            raise RuntimeError("WebSocket loop not initialized")
+
+        # Register the future after the ws_loop check so it won't leak
+        # if the check raises.
         self._upload_ack_futures[req_id] = fut
-        try:
+
+        async def _send() -> None:
             await self._client._ws_manager.send(
                 {"cmd": cmd, "headers": {"req_id": req_id}, "body": body},
+            )
+
+        try:
+            # Schedule send in WS thread and wait for response
+            send_future = asyncio.run_coroutine_threadsafe(_send(), ws_loop)
+            send_future.add_done_callback(
+                lambda f: f.result() if not f.cancelled() else None,
             )
             ack = await asyncio.wait_for(
                 asyncio.shield(fut),
@@ -719,7 +898,7 @@ class WecomChannel(BaseChannel):
         if not self._client or not self._upload_lock:
             return None
         # Strip file:// prefix
-        local = path.removeprefix("file://")
+        local = file_url_to_local_path(path) or path
         p = Path(local)
         if not p.is_file():
             logger.warning("wecom upload: file not found: %s", local[:80])
@@ -795,11 +974,13 @@ class WecomChannel(BaseChannel):
                     media_type,
                 )
                 return media_id
-            except Exception:
+            except Exception as e:
                 logger.exception(
-                    "wecom _upload_media failed path=%s",
+                    "wecom _upload_media failed path=%s error=%s",
                     local[:60],
+                    str(e)[:100],
                 )
+
                 return None
 
     async def _send_media_part(
@@ -821,7 +1002,7 @@ class WecomChannel(BaseChannel):
                 or ""
             )
             # WeCom voice only supports AMR; send other formats as file.
-            _local = raw_path.removeprefix("file://")
+            _local = file_url_to_local_path(raw_path) or raw_path
             media_type = (
                 "voice" if Path(_local).suffix.lower() == ".amr" else "file"
             )
@@ -865,6 +1046,57 @@ class WecomChannel(BaseChannel):
                     chatid[:20],
                 )
 
+    async def _keepalive_processing(
+        self,
+        frame: Any,
+        stream_id: str,
+        interval: float = _PROCESSING_REFRESH_INTERVAL,
+        max_duration: float = _PROCESSING_MAX_DURATION,
+    ) -> None:
+        """Refresh placeholder stream; force-finish at max_duration.
+
+        Prevents WeCom server from silently dropping the stream while
+        the agent is still running (issue #3947).
+        """
+        if not self._client:
+            return
+        elapsed = 0.0
+        try:
+            while elapsed + interval <= max_duration:
+                await asyncio.sleep(interval)
+                elapsed += interval
+                try:
+                    await self._client.reply_stream(
+                        frame,
+                        stream_id=stream_id,
+                        content=_PROCESSING_TEXT,
+                        finish=False,
+                    )
+                except Exception:
+                    logger.debug(
+                        "wecom keepalive refresh failed stream_id=%s",
+                        stream_id[:20],
+                    )
+            # Close stream so next reply can use a fresh stream_id.
+            try:
+                await self._client.reply_stream(
+                    frame,
+                    stream_id=stream_id,
+                    content=_PROCESSING_TEXT,
+                    finish=True,
+                )
+                logger.info(
+                    "wecom keepalive force-finished after %.0fs stream_id=%s",
+                    max_duration,
+                    stream_id[:20],
+                )
+            except Exception:
+                logger.debug("wecom keepalive force-finish failed")
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._keepalive_tasks.pop(stream_id, None)
+
     async def _send_text_via_frame(
         self,
         frame: Any,
@@ -891,6 +1123,198 @@ class WecomChannel(BaseChannel):
             )
         except Exception:
             logger.exception("wecom _send_text_via_frame failed")
+
+    # ------------------------------------------------------------------
+    # Streaming hooks (real-time delta push via reply_stream)
+    # ------------------------------------------------------------------
+
+    async def _cancel_keepalive_and_get_stream_id(
+        self,
+        send_meta: Dict[str, Any],
+    ) -> str:
+        """Cancel keepalive and reuse its stream_id, or create a new one."""
+        processing_sid = send_meta.pop(
+            "wecom_processing_stream_id",
+            "",
+        )
+        keepalive_task = self._keepalive_tasks.pop(processing_sid, None)
+        if keepalive_task is not None and not keepalive_task.done():
+            keepalive_task.cancel()
+            try:
+                await keepalive_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            return processing_sid
+        return generate_req_id("stream")
+
+    def _get_streaming_sids(
+        self,
+        send_meta: Dict[str, Any],
+    ) -> Dict[str, str]:
+        """Return the per-stream_type sid mapping, lazily initialized."""
+        sids = send_meta.get("wecom_streaming_sids")
+        if sids is None:
+            sids = {}
+            send_meta["wecom_streaming_sids"] = sids
+        return sids
+
+    def _build_display_text(
+        self,
+        stream_type: str,
+        text: str,
+        send_meta: Dict[str, Any],
+    ) -> str:
+        """Format text for display based on stream_type."""
+        if stream_type == "reasoning":
+            return f"💭 {text}"
+        prefix = send_meta.get("bot_prefix", "") or self.bot_prefix or ""
+        if prefix:
+            return f"{prefix}  {text}"
+        return text
+
+    async def on_streaming_start(
+        self,
+        request: "AgentRequest",
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+        stream_type: str,
+        accumulated_text: str = "",
+    ) -> None:
+        """Allocate a stream_id for this stream_type."""
+        frame = send_meta.get("wecom_frame")
+        if not frame or not self._client:
+            return
+
+        sids = self._get_streaming_sids(send_meta)
+
+        if not sids:
+            stream_id = await self._cancel_keepalive_and_get_stream_id(
+                send_meta,
+            )
+        else:
+            stream_id = generate_req_id("stream")
+
+        sids[stream_type] = stream_id
+
+    async def on_streaming_delta(
+        self,
+        request: "AgentRequest",
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+        stream_type: str,
+        accumulated_text: str = "",
+    ) -> None:
+        """Push an incremental update by overwriting the current bubble."""
+        frame = send_meta.get("wecom_frame")
+        sids = self._get_streaming_sids(send_meta)
+        stream_id = sids.get(stream_type, "")
+        if not frame or not self._client or not stream_id:
+            return
+
+        display_text = self._build_display_text(
+            stream_type,
+            accumulated_text,
+            send_meta,
+        )
+
+        try:
+            await self._client.reply_stream(
+                frame,
+                stream_id=stream_id,
+                content=display_text,
+                finish=False,
+            )
+        except Exception:
+            logger.debug(
+                "wecom streaming delta failed stream_id=%s",
+                stream_id[:20],
+            )
+
+    async def on_streaming_end(
+        self,
+        request: "AgentRequest",
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+        stream_type: str,
+        accumulated_text: str = "",
+    ) -> None:
+        """Finish a single streaming segment without affecting others."""
+        frame = send_meta.get("wecom_frame")
+        sids = self._get_streaming_sids(send_meta)
+        stream_id = sids.pop(stream_type, "")
+        if not frame or not self._client or not stream_id:
+            return
+
+        display_text = self._build_display_text(
+            stream_type,
+            accumulated_text,
+            send_meta,
+        )
+
+        try:
+            await self._client.reply_stream(
+                frame,
+                stream_id=stream_id,
+                content=display_text,
+                finish=True,
+            )
+        except Exception:
+            logger.debug(
+                "wecom streaming end failed stream_id=%s",
+                stream_id[:20],
+            )
+
+        await self._card_handler.try_send_card_for_event(
+            to_handle,
+            event,
+            send_meta,
+            skip_stream_detail=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Session processing state management
+    # ------------------------------------------------------------------
+
+    async def _consume_with_tracker(
+        self,
+        request: "AgentRequest",
+        payload: Any,
+    ) -> None:
+        """Override to track per-session busy state (TaskTracker path)."""
+        session_id = getattr(request, "session_id", "") or ""
+        self._processing_sessions.add(session_id)
+        try:
+            await super()._consume_with_tracker(request, payload)
+        finally:
+            self._processing_sessions.discard(session_id)
+
+    # ------------------------------------------------------------------
+    # Interactive cards (tool_guard approval, etc.)
+    # ------------------------------------------------------------------
+
+    async def on_event_message_completed(
+        self,
+        request: "AgentRequest",
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+    ) -> None:
+        """Render card-flagged events via the card handler; else default."""
+        if await self._card_handler.try_send_card_for_event(
+            to_handle,
+            event,
+            send_meta,
+        ):
+            return
+        await super().on_event_message_completed(
+            request,
+            to_handle,
+            event,
+            send_meta,
+        )
 
     async def send_content_parts(  # pylint: disable=too-many-locals
         self,
@@ -942,9 +1366,19 @@ class WecomChannel(BaseChannel):
         # Format markdown tables for WeCom compatibility
         body = format_markdown_tables(body)
 
-        # Use processing stream_id to overwrite "thinking..." indicator
-        # Only first reply uses it; subsequent replies get new stream_id
+        # Reuse placeholder stream_id on first chunk; cancel its
+        # keepalive task first to avoid racing finish=True. If task
+        # is already gone, it force-finished the stream, so start fresh.
         processing_sid = m.pop("wecom_processing_stream_id", "")
+        keepalive_task = self._keepalive_tasks.pop(processing_sid, None)
+        if keepalive_task is not None and not keepalive_task.done():
+            keepalive_task.cancel()
+            try:
+                await keepalive_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        elif keepalive_task is None and processing_sid:
+            processing_sid = ""
 
         first_chunk = True
         for chunk in split_text(body) if body else []:
@@ -1099,6 +1533,34 @@ class WecomChannel(BaseChannel):
                 pass
             self._ws_loop = None
 
+    async def health_check(self) -> Dict[str, Any]:
+        """Check WeCom WebSocket client status."""
+        if not self.enabled:
+            return {
+                "channel": self.channel,
+                "status": "disabled",
+                "detail": "WeCom channel is disabled.",
+            }
+        issues = []
+        if self._client is None:
+            issues.append("WeCom WebSocket client not initialized")
+        ws_thread_alive = (
+            self._ws_thread is not None and self._ws_thread.is_alive()
+        )
+        if not ws_thread_alive:
+            issues.append("WebSocket thread is not running")
+        if issues:
+            return {
+                "channel": self.channel,
+                "status": "unhealthy",
+                "detail": "; ".join(issues),
+            }
+        return {
+            "channel": self.channel,
+            "status": "healthy",
+            "detail": "WeCom WebSocket client is connected.",
+        }
+
     async def start(self) -> None:
         if not self.enabled:
             logger.debug("wecom channel disabled")
@@ -1119,6 +1581,7 @@ class WecomChannel(BaseChannel):
             bot_id=self.bot_id,
             secret=self.secret,
             max_reconnect_attempts=self._max_reconnect_attempts,
+            logger=_SdkLoggerAdapter(_sdk_logger),
         )
         self._client = WSClient(options)
 
@@ -1141,9 +1604,14 @@ class WecomChannel(BaseChannel):
         # Register event handlers
         self._client.on("message", self._on_message_sync)
         self._client.on("event.enter_chat", self._on_enter_chat_sync)
+        self._client.on(
+            "event.template_card_event",
+            self._card_handler.handle_template_card_event_sync,
+        )
 
-        # Patch SDK heartbeat to trigger reconnect on pong timeout.
-        # Use ensure_future so reconnect survives heartbeat task cancel.
+        # On pong timeout just close the ws; let SDK's _receive_loop
+        # ConnectionClosed branch handle stop_heartbeat + reconnect,
+        # to avoid double _schedule_reconnect race (issue #2757).
         ws_mgr = self._client._ws_manager
         _original_send_heartbeat = ws_mgr._send_heartbeat
 
@@ -1151,14 +1619,9 @@ class WecomChannel(BaseChannel):
             if ws_mgr._missed_pong_count >= ws_mgr._max_missed_pong:
                 logger.warning(
                     "wecom heartbeat: no pong for %d pings, "
-                    "triggering reconnect",
+                    "closing ws to trigger reconnect",
                     ws_mgr._missed_pong_count,
                 )
-                # Schedule reconnect BEFORE _stop_heartbeat() because
-                # it cancels the current task; any await after that
-                # would raise CancelledError.
-                asyncio.ensure_future(ws_mgr._schedule_reconnect())
-                ws_mgr._stop_heartbeat()
                 if ws_mgr._ws:
                     try:
                         await ws_mgr._ws.close()
@@ -1210,9 +1673,16 @@ class WecomChannel(BaseChannel):
     async def stop(self) -> None:
         if not self.enabled:
             return
-        if self._client:
+        # disconnect() uses asyncio.ensure_future() internally which
+        # binds to the current loop; schedule it on _ws_loop so the
+        # ws is operated on its own loop (issue #2757).
+        if (
+            self._client
+            and self._ws_loop is not None
+            and self._ws_loop.is_running()
+        ):
             try:
-                self._client.disconnect()
+                self._ws_loop.call_soon_threadsafe(self._client.disconnect)
             except Exception:
                 pass
         if self._ws_loop is not None:

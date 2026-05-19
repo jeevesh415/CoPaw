@@ -10,13 +10,16 @@ import json
 
 from fastapi import APIRouter, Body, HTTPException
 
+from ...agents.skill_system.registry import (
+    set_builtin_skill_language_preference,
+)
 from ...constant import WORKING_DIR
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
 _SETTINGS_FILE = WORKING_DIR / "settings.json"
 
-_VALID_LANGUAGES = {"en", "zh", "ja", "ru"}
+_VALID_LANGUAGES = {"en", "zh", "ja", "ru", "pt-BR", "id"}
 
 
 def _load() -> dict:
@@ -55,4 +58,9 @@ async def put_language(
     data = _load()
     data["language"] = language
     _save(data)
+    # Update cached builtin preference since it falls back to UI language.
+    if not data.get("builtin_skill_language"):
+        set_builtin_skill_language_preference(
+            "zh" if language.startswith("zh") else "en",
+        )
     return {"language": language}

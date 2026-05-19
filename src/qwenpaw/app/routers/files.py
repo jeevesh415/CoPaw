@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from pathlib import Path
+from urllib.parse import unquote
 from fastapi import APIRouter, HTTPException
 from starlette.responses import FileResponse
 
@@ -15,9 +16,20 @@ async def preview_file(
     filepath: str,
 ):
     """Preview file."""
-    path = Path(filepath)
+    normalized = unquote(filepath)
+
+    # Normalize /C:/... to C:/... on Windows.
+    if (
+        len(normalized) >= 4
+        and normalized[0] == "/"
+        and normalized[2] == ":"
+        and normalized[1].isalpha()
+    ):
+        normalized = normalized[1:]
+
+    path = Path(normalized)
     if not path.is_absolute():
-        path = Path("/" + filepath)
+        path = Path("/" + normalized)
     path = path.resolve()
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Not found")

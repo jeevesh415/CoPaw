@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .runner import AgentRunner
+    from ...agents.context import AgentContext
 
 
 def _get_last_user_text(msgs) -> str | None:
@@ -49,11 +50,18 @@ def _get_last_user_text(msgs) -> str | None:
 
 
 def _is_conversation_command(query: str | None) -> bool:
-    """True if query is a conversation command (/compact, /new, etc.)."""
+    """True if query is a conversation command (/compact, /new, etc.).
+
+    ``/plan <description>`` (with arguments) is NOT a command — it
+    passes through the runner to activate plan mode.
+    """
     if not query or not query.startswith("/"):
         return False
     stripped = query.strip().lstrip("/")
-    cmd = stripped.split(" ", 1)[0] if stripped else ""
+    parts = stripped.split(" ", 1)
+    cmd = parts[0] if parts else ""
+    if cmd == "plan" and len(parts) > 1 and parts[1].strip():
+        return False
     return cmd in CommandHandler.SYSTEM_COMMANDS
 
 
@@ -97,6 +105,7 @@ async def run_command_path(  # pylint: disable=too-many-statements,too-many-bran
 
     session_id = getattr(request, "session_id", "") or ""
     user_id = getattr(request, "user_id", "") or ""
+    channel_name = getattr(request, "channel", "") or ""
 
     # Daemon path
     parsed = parse_daemon_query(query)
@@ -110,7 +119,7 @@ async def run_command_path(  # pylint: disable=too-many-statements,too-many-bran
             )
             # Yield hint first so user sees it before restart runs.
             hint = Msg(
-                name="Friday",
+                name=runner.agent_name,
                 role="assistant",
                 content=[
                     TextBlock(
@@ -129,16 +138,20 @@ async def run_command_path(  # pylint: disable=too-many-statements,too-many-bran
         daemon_ctx = DaemonContext(
             load_config_fn=lambda: load_agent_config(agent_id),
             memory_manager=runner.memory_manager,
+            context_manager=runner.context_manager,
             manager=manager,
             agent_id=agent_id,
             session_id=session_id,
+            agent_name=runner.agent_name,
         )
         msg = await handler.handle_daemon_command(query, daemon_ctx)
+        if parsed[0] in ("reload-config", "restart"):
+            runner.invalidate_agent_name_cache()
         yield msg, True
         logger.info("handle_daemon_command %s completed", query)
         return
 
-    # Control command path (e.g. /stop)
+    # Control command path (e.g. /stop, /approval)
     if _is_control_command(query):
         workspace = runner._workspace  # pylint: disable=protected-access
         if workspace is None:
@@ -146,7 +159,7 @@ async def run_command_path(  # pylint: disable=too-many-statements,too-many-bran
                 "run_command_path: control command but workspace not set",
             )
             error_msg = Msg(
-                name="Friday",
+                name=runner.agent_name,
                 role="assistant",
                 content=[
                     TextBlock(
@@ -176,7 +189,7 @@ async def run_command_path(  # pylint: disable=too-many-statements,too-many-bran
                 f"run_command_path: channel not found: {channel_id}",
             )
             error_msg = Msg(
-                name="Friday",
+                name=runner.agent_name,
                 role="assistant",
                 content=[
                     TextBlock(
@@ -198,6 +211,7 @@ async def run_command_path(  # pylint: disable=too-many-statements,too-many-bran
             channel=channel,
             session_id=session_id,
             user_id=user_id,
+            agent_id=runner.agent_id,
             args={},
         )
 
@@ -208,7 +222,7 @@ async def run_command_path(  # pylint: disable=too-many-statements,too-many-bran
                 control_ctx,
             )
             response_msg = Msg(
-                name="Friday",
+                name=runner.agent_name,
                 role="assistant",
                 content=[TextBlock(type="text", text=response_text)],
             )
@@ -220,7 +234,7 @@ async def run_command_path(  # pylint: disable=too-many-statements,too-many-bran
             else:
                 logger.exception("Control command unexpected error: %s", query)
             error_msg = Msg(
-                name="Friday",
+                name=runner.agent_name,
                 role="assistant",
                 content=[
                     TextBlock(
@@ -233,25 +247,28 @@ async def run_command_path(  # pylint: disable=too-many-statements,too-many-bran
         return
 
     # Conversation path: lightweight memory + CommandHandler
-    memory = runner.memory_manager.get_in_memory_memory()
+    context_manager = runner.context_manager
+    memory: "AgentContext" = context_manager.get_agent_context()
     session_state = await runner.session.get_session_state_dict(
         session_id=session_id,
         user_id=user_id,
+        channel=channel_name,
     )
     memory_state = session_state.get("agent", {}).get("memory", {})
-    memory.load_state_dict(memory_state, strict=False)
+    if memory is not None:
+        memory.load_state_dict(memory_state, strict=False)
 
     conv_handler = CommandHandler(
-        agent_name="Friday",
+        agent_name=runner.agent_name,
         memory=memory,
         memory_manager=runner.memory_manager,
-        enable_memory_manager=runner.memory_manager is not None,
+        context_manager=context_manager,
     )
     try:
         response_msg = await conv_handler.handle_conversation_command(query)
     except (RuntimeError, AppBaseException) as e:
         response_msg = Msg(
-            name="Friday",
+            name=runner.agent_name,
             role="assistant",
             content=[TextBlock(type="text", text=str(e))],
         )
@@ -265,7 +282,46 @@ async def run_command_path(  # pylint: disable=too-many-statements,too-many-bran
             key="agent.memory",
             value=memory.state_dict(),
             user_id=user_id,
+            channel=channel_name,
         )
+
+        # Clear plan state when /clear or /new is used
+        metadata = getattr(response_msg, "metadata", None)
+        if isinstance(metadata, dict) and metadata.get("clear_plan"):
+            try:
+                from agentscope.plan import PlanNotebook, InMemoryPlanStorage
+
+                _empty_nb = PlanNotebook(storage=InMemoryPlanStorage())
+                await runner.session.update_session_state(
+                    session_id=session_id,
+                    key="agent.plan_notebook",
+                    value=_empty_nb.state_dict(),
+                    user_id=user_id,
+                    channel=channel_name,
+                )
+                logger.info(
+                    "Cleared plan_notebook from session %s",
+                    session_id,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to clear plan_notebook from session",
+                    exc_info=True,
+                )
+
+            try:
+                from ...plan.broadcast import broadcast_plan_update
+
+                broadcast_plan_update(
+                    runner.agent_id,
+                    {"type": "plan_update", "plan": None},
+                    session_id=session_id,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to broadcast plan clear",
+                    exc_info=True,
+                )
     else:
         logger.warning(
             "Skipping session_state update for conversation"
